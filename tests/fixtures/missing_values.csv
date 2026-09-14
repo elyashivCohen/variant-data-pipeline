@@ -1,0 +1,7 @@
+index,CHROM,POS,REF,ALT
+,chr1,10,A,T
+id,,10,A,T
+id,chr1,,A,T
+id,chr1,10,,T
+id,chr1,10,A, 
+chrX:60_A/T,chrX,60,A,T

@@ -97,3 +97,25 @@ The CLI exits with status 0 on success, 1 on conversion failure, and 2 for argpa
 Input and output referring to the same file are rejected. Each JSON output is written to a uniquely named temporary sibling file, closed, and then used to replace the expected output. This preserves previous output on writing or replacement failure and avoids appending duplicates on reruns. Cleanup is attempted on failure; if cleanup also fails, the original error is preserved and a temporary file may remain. Concurrent runs are not supported.
 
 Paths are supplied through function arguments or the existing `--input-dir` and `--output-dir` CLI options. Future containers can pass mounted directory paths through these same options; conversion contains no Docker-specific logic. The commands above require a working local Python installation.
+
+## 10. Automated Convert Verification
+
+Run the existing standard-library unittest suite with readable console labels from the repository root:
+
+```sh
+python -B tests/run_tests.py
+```
+
+The runner uses test docstrings as display names, shows `[PASS]`, `[FAIL]`, `[ERROR]`, and `[SKIP]` labels, and retains unittest assertion details and tracebacks. Skips include their reasons. Discovery and project imports are resolved relative to the script. The standard verbose command remains available:
+
+```sh
+python -B -m unittest discover -s tests -v
+```
+
+`input/` contains the five unchanged original assignment CSV files. Authored valid and invalid examples live in `tests/fixtures/`; `tests/test_convert.py` reads these fixtures and the original samples, using temporary output directories with automatic cleanup. No manual-check directories or generated outputs are needed.
+
+The suite checks exact JSON records and accepted/skipped counts, warnings and continued processing after invalid records, header and CSV parser failures, output preservation, reruns, mocked I/O failures, and CLI logs and exit codes. Error scenarios pass only when the expected exception, log, exit code, or output state is observed. Standard verbose unittest reporting shows each test's result and the final totals.
+
+The readable summary counts successful test methods as passes and each failure, error, or skip event separately, including subtest events. A parent with a failed subtest is never reported as passed; several unsuccessful subtests can make event totals exceed the number of test methods. Expected failures are labeled and counted as skips; unexpected successes count as failures. Exit status is 0 when unittest reports success and 1 otherwise.
+
+Verification on Windows with Python 3.13.14: the readable runner ran 23 tests in 0.329 seconds; standard unittest ran 23 tests in 0.319 seconds. Each reported 22 passed, 0 failures, 0 errors, and one symbolic-link test skipped because Windows denied permission (exit code 0). Python 3.9 was not tested. The multiline CSV test writes through `Path.open` with `newline=""` to prevent Windows newline translation while retaining Python 3.9 compatibility.

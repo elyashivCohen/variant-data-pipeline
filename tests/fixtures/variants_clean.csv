@@ -1,0 +1,7 @@
+index,CHROM,POS,REF,ALT
+chr1:10_G/T,chr1,10,G,T
+chr2:20_ATCG/T,chr2,20,ATCG,T
+chr3:30_A/GCAT,chr3,30,A,GCAT
+chr12:40_GAAGTC/G,chr12,40,GAAGTC,G
+chrY:50_C/G,chrY,50,C,G
+chrX:60_A/T,chrX,60,A,T

@@ -1,0 +1,4 @@
+index,CHROM,POS,REF,ALT
+chr1:10_G/T,chr1,10,G,T
+id,chr2,20,"A,T
+chrX:60_A/T,chrX,60,A,T
