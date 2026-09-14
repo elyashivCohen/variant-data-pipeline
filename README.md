@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. This README outlines the initial local design; implementation is pending.
+This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert is implemented; Process, Aggregate, and orchestration remain planned.
 
 ## 2. Requirements
 
@@ -50,19 +50,19 @@ The local design uses sequential stage execution and a configurable Process dela
 
 ## 5. Data / Persistence Strategy
 
-JSON is the proposed intermediate and summary format: it is readable and supports records alongside metadata. Each input will have one converted output and one processed output.
+JSON is the implemented conversion format and the proposed downstream format: it is readable and supports records alongside metadata. Each input has one converted output and will have one processed output. The assignment allows JSON without prescribing its exact schema; the metadata object is a project choice.
 
 Files persisted to disk between stages will act as the local pipeline state. Inputs will remain unchanged, and shared host directories will preserve outputs across container runs. No database is planned. This approach keeps the batch workflow simple; concurrent execution is outside the initial design.
 
 ## 6. Logging Strategy
 
-Logs will go to stdout/stderr so Docker can collect them. Informational messages will report stage progress and completion. Each skipped row will generate a warning with the input filename, row location, and reason. Errors will identify file-level or stage-level failures. Aggregation will use persisted metrics rather than parse logs.
+The Convert CLI configures logging to stderr so Docker can collect it. Each written file generates an INFO message with accepted and skipped counts. Each skipped record generates one WARNING with its input path, starting physical line number, and reason. Expected failures produce one concise ERROR at the CLI boundary; unexpected exceptions include a traceback. Aggregation will use persisted metrics rather than parse logs.
 
 ## 7. Idempotency Strategy
 
 Outputs will use deterministic paths: `input/sample.csv` will map to `data/converted/sample.json` and `data/processed/sample.json`. Reruns will regenerate and overwrite expected outputs instead of appending duplicates.
 
-The summary will be rebuilt from the current run's processed results, excluding stale outputs. Safe overwrite behavior will be defined and tested during implementation to prevent partial writes from corrupting data.
+The summary will be rebuilt from the current run's processed results, excluding stale outputs. Convert already writes temporary files before replacing outputs to prevent partial writes from corrupting existing data.
 
 Unchanged inputs will produce the same variant and skipped-row totals on repeated runs. Timing metadata may change because processing runs again.
 
@@ -75,3 +75,25 @@ Unchanged inputs will produce the same variant and skipped-row totals on repeate
 5. Test valid and malformed data, aggregation, repeat runs, stale outputs, and failure handling.
 6. Containerize the stages and verify the full local workflow with shared persistent directories.
 7. Add verified run/test commands, AI workflow notes, and implementation trade-offs to this README.
+
+## 9. Convert Stage
+
+Requires Python 3.9 or later and uses only the standard library. From the repository root:
+
+```sh
+python -m src.convert --input-dir input --output-dir data/converted
+```
+
+`convert(input_dir: Path, output_dir: Path)` reads CSV files directly inside the input directory and returns the JSON paths written during that call. `convert_file(input_path: Path, output_path: Path)` converts a single file independently. JSON contains `source_file`, `row_count`, `skipped_rows`, and `variants`.
+
+Validation choices: files use UTF-8 (an optional BOM is accepted). Header names are trimmed, must be unique after trimming, and must include all required columns. Columns may be reordered and extra columns are ignored. Rows must match the header's field count. Required values are trimmed and must be nonempty; `POS` must be a positive integer. Other required values remain strings, including multi-character alleles. Accepted records retain their input order and supplied index values; no biological validation or deduplication is performed.
+
+Blank records, incorrect field counts, empty required values, and invalid positions are skipped with warnings. Strict CSV parser errors fail the file: malformed quoting can consume subsequent physical lines, so continuing cannot reliably recover record boundaries or skipped counts. This parser-error policy is a project decision, separate from skipping records whose fields can be parsed.
+
+Missing inputs, invalid headers, completely empty files, decoding errors, and I/O errors also fail conversion. Missing input directories or no CSV files fail the batch. Header-only files and files with no valid rows produce the same metadata object with an empty `variants` array and accurate counts. `source_file` is the input filename, `row_count` counts accepted records, and `skipped_rows` counts rejected parsed records.
+
+The CLI exits with status 0 on success, 1 on conversion failure, and 2 for argparse usage errors. Batches stop at the first failed file; files completed earlier remain on disk, and old outputs are not removed. Callers should use the returned paths only after a successful batch call.
+
+Input and output referring to the same file are rejected. Each JSON output is written to a uniquely named temporary sibling file, closed, and then used to replace the expected output. This preserves previous output on writing or replacement failure and avoids appending duplicates on reruns. Cleanup is attempted on failure; if cleanup also fails, the original error is preserved and a temporary file may remain. Concurrent runs are not supported.
+
+Paths are supplied through function arguments or the existing `--input-dir` and `--output-dir` CLI options. Future containers can pass mounted directory paths through these same options; conversion contains no Docker-specific logic. The commands above require a working local Python installation.
