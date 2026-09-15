@@ -22,6 +22,11 @@ class ConversionError(ValueError):
     """An expected validation failure prevents conversion."""
 
 
+# A file that raises one of these while being read cannot be converted, but
+# does not implicate any other file: skip it and keep processing the batch.
+INPUT_ERRORS = (ConversionError, csv.Error, OSError, UnicodeError)
+
+
 def validate_header(header: list[str]) -> list[str]:
     """Return normalized column names, or raise ConversionError."""
     header = [column.strip() for column in header]
@@ -74,12 +79,21 @@ def write_json_safely(output_path: Path, payload: dict[str, object]) -> None:
                     raise
 
 
-def convert_file(input_path: Path, output_path: Path) -> Path:
-    """Write one JSON file; skip invalid rows and raise on file-level errors."""
+def _reject_same_file(input_path: Path, output_path: Path) -> None:
+    """Raise ConversionError if input and output resolve to the same file."""
     if input_path.resolve() == output_path.resolve() or (
         output_path.exists() and input_path.samefile(output_path)
     ):
         raise ConversionError(f"{input_path}: input and output refer to the same file")
+
+
+def read_variants(input_path: Path) -> tuple[list[dict[str, object]], int]:
+    """Read and validate one CSV file's rows into (variants, skipped_rows).
+
+    Row-level errors are skipped with a warning and do not stop the file.
+    Raises ConversionError or csv.Error for header or parser-level problems;
+    OSError/UnicodeError propagate from opening or decoding the file itself.
+    """
     variants = []
     skipped_rows = 0
     with input_path.open(encoding="utf-8-sig", newline="") as source:
@@ -108,13 +122,23 @@ def convert_file(input_path: Path, output_path: Path) -> Path:
                 continue
 
             variants.append(variant)
+    return variants, skipped_rows
 
-    payload = {
+
+def _build_payload(input_path: Path, variants: list[dict[str, object]], skipped_rows: int) -> dict:
+    return {
         "source_file": input_path.name,
         "row_count": len(variants),
         "skipped_rows": skipped_rows,
         "variants": variants,
     }
+
+
+def convert_file(input_path: Path, output_path: Path) -> Path:
+    """Convert one CSV file to JSON independently; raise on any file-level failure."""
+    _reject_same_file(input_path, output_path)
+    variants, skipped_rows = read_variants(input_path)
+    payload = _build_payload(input_path, variants, skipped_rows)
     write_json_safely(output_path, payload)
     logger.info("%s -> %s: wrote %s records; skipped %s", input_path, output_path,
                 len(variants), skipped_rows)
@@ -122,10 +146,19 @@ def convert_file(input_path: Path, output_path: Path) -> Path:
 
 
 def convert(input_dir: Path, output_dir: Path) -> list[Path]:
-    """Return current outputs, or propagate a file or batch failure.
+    """Convert every CSV file in input_dir; return this run's successful outputs.
 
-    Files completed before a later failure remain on disk. Existing outputs
-    are replaced, never appended; callers should use only a successful return.
+    A file that cannot be opened or parsed is logged and skipped so the rest
+    of the batch keeps going. A failure while writing an output is not an
+    input problem, so it is never treated as skippable: it stops the batch
+    immediately, even if earlier files already succeeded. Files completed
+    before that point remain on disk and existing outputs are replaced, never
+    appended.
+
+    The batch fails - raising ConversionError - if input files exist but none
+    convert successfully, including when input_dir has no CSV files at all.
+    Success is judged solely by outputs produced during this call; files
+    already present in output_dir from a previous run do not count.
     """
     if not input_dir.is_dir():
         raise ConversionError(f"Input path is not an existing directory: {input_dir}")
@@ -136,7 +169,21 @@ def convert(input_dir: Path, output_dir: Path) -> list[Path]:
     output_paths = []
     for input_path in input_paths:
         output_path = output_dir / f"{input_path.stem}.json"
-        output_paths.append(convert_file(input_path, output_path))
+        try:
+            _reject_same_file(input_path, output_path)
+            variants, skipped_rows = read_variants(input_path)
+        except INPUT_ERRORS as error:
+            logger.error("%s: skipping file: %s", input_path, error)
+            continue
+
+        payload = _build_payload(input_path, variants, skipped_rows)
+        write_json_safely(output_path, payload)  # not caught above: write failures are fatal
+        logger.info("%s -> %s: wrote %s records; skipped %s", input_path, output_path,
+                    len(variants), skipped_rows)
+        output_paths.append(output_path)
+
+    if not output_paths:
+        raise ConversionError(f"No input file in {input_dir} converted successfully")
     return output_paths
 
 

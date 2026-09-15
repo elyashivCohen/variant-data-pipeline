@@ -224,6 +224,61 @@ class ProcessTests(unittest.TestCase):
         ])
         self.assertEqual(code_invalid_sleep, 2)
 
+    def test_mixed_success_and_failure_continues_batch(self):
+        """Mixed SUCCESS/FAILED outcomes still let the batch complete."""
+        self._create_sample_stage1_file("good_a.json", row_count=2, skipped_rows=0)
+        (self.input_dir / "corrupt.json").write_text("not json", encoding="utf-8")
+        self._create_sample_stage1_file("good_b.json", row_count=3, skipped_rows=1)
+
+        results = process(self.input_dir, self.output_dir, sleep_duration=0)
+
+        statuses = {r["input_file"]: r["status"] for r in results}
+        self.assertEqual(statuses, {
+            "good_a.json": "SUCCESS", "corrupt.json": "FAILED", "good_b.json": "SUCCESS",
+        })
+
+    def test_all_files_failing_raises_value_error(self):
+        """A batch where every file fails raises ValueError instead of a quiet success."""
+        (self.input_dir / "bad_a.json").write_text("not json", encoding="utf-8")
+        (self.input_dir / "bad_b.json").write_text("{}", encoding="utf-8")  # missing row_count
+
+        with self.assertRaises(ValueError):
+            process(self.input_dir, self.output_dir, sleep_duration=0)
+
+        # Individual FAILED records are still written for inspection.
+        self.assertEqual({p.name for p in self.output_dir.iterdir()}, {"bad_a.json", "bad_b.json"})
+
+    def test_empty_input_directory_raises_value_error(self):
+        """An existing input directory with no eligible *.json files fails the stage."""
+        with self.assertRaises(ValueError):
+            process(self.input_dir, self.output_dir, sleep_duration=0)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_unexpected_error_propagates_instead_of_becoming_failed(self):
+        """A programming-error-shaped exception is not disguised as an input failure."""
+        self._create_sample_stage1_file("sample.json")
+        with patch("src.process.read_converted_file", side_effect=TypeError("boom")):
+            with self.assertRaises(TypeError):
+                process(self.input_dir, self.output_dir, sleep_duration=0)
+
+    def test_output_write_failure_propagates_after_earlier_success(self):
+        """An output-write failure is fatal immediately, not recorded as a FAILED result."""
+        self._create_sample_stage1_file("first.json")
+        self._create_sample_stage1_file("second.json")
+        real_write_metrics = write_metrics
+
+        def fail_on_second(output_path, metrics):
+            if output_path.name == "second.json":
+                raise OSError("disk full")
+            real_write_metrics(output_path, metrics)
+
+        with patch("src.process.write_metrics", side_effect=fail_on_second):
+            with self.assertRaises(OSError):
+                process(self.input_dir, self.output_dir, sleep_duration=0)
+
+        self.assertTrue((self.output_dir / "first.json").exists())
+        self.assertFalse((self.output_dir / "second.json").exists())
+
     def test_end_to_end_integration_with_stage1_convert(self):
         """Stage 2 successfully consumes actual output from Stage 1 Convert."""
         sample_csv = PROJECT_ROOT / "input" / "variants_1.csv"

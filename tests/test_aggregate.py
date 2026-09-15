@@ -87,6 +87,36 @@ class AggregateTests(unittest.TestCase):
         # The FAILED file contributes 0 skipped rows but nonzero (or zero) duration.
         self.assertEqual(summary["total_skipped_rows"], 0)
 
+    def test_convert_output_with_no_process_outcome_fails(self):
+        """A Convert output that Process never even attempted fails aggregation."""
+        self._build_pipeline(["variants_clean.csv"])
+        # An extra Convert output with no corresponding Process attempt at all -
+        # e.g. Process was pointed at a different/stale directory pairing.
+        extra = self.convert_dir / "extra.json"
+        extra.write_text(json.dumps({
+            "source_file": "extra.csv", "row_count": 0, "skipped_rows": 0, "variants": [],
+        }), encoding="utf-8")
+
+        with self.assertRaises(ValueError) as error:
+            aggregate(self.convert_dir, self.process_dir)
+        self.assertIn("extra.json", str(error.exception))
+
+    def test_matching_failed_outcome_satisfies_completeness(self):
+        """A Convert output with a matching FAILED Process outcome is not treated as missing."""
+        self._build_pipeline(["variants_clean.csv"])
+        # Corrupt the Convert output so Process rejects it, while the file itself
+        # still exists in convert_dir - a genuine matched pair, just a FAILED one.
+        converted = self.convert_dir / "variants_clean.json"
+        converted.write_text(json.dumps({"source_file": "variants_clean.csv"}), encoding="utf-8")
+        failed = process_file(converted, self.process_dir, sleep_duration=0)
+        self.assertEqual(failed["status"], "FAILED")
+
+        summary = aggregate(self.convert_dir, self.process_dir)
+
+        self.assertEqual(summary["input_files_processed"], ["variants_clean.json"])
+        self.assertEqual(summary["variant_counts_by_chromosome"], {})
+        self.assertEqual(summary["total_variant_count"], 0)
+
     def test_idempotent_rerun_produces_identical_summary(self):
         """Running aggregation twice on unchanged inputs yields an identical summary file."""
         self._build_pipeline(["variants_clean.csv", "variants_messy.csv"])

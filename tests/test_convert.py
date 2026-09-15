@@ -111,17 +111,20 @@ class ConvertTests(unittest.TestCase):
         self.assertTrue(all(record.levelno == logging.INFO for record in logs.records))
 
     def test_missing_header_makes_convert_raise_conversion_error(self):
-        """Missing or duplicate headers raise ConversionError."""
+        """Missing or duplicate headers are skipped, and a batch of only bad files fails."""
         for name in ("missing_header.csv", "duplicate_header.csv"):
             with self.subTest(fixture=name):
                 source = self.copy_fixture(name)
-                with self.assertRaises(ConversionError):
-                    convert(self.input_dir, self.output_dir)
+                with self.assertLogs("src.convert", level="ERROR") as logs:
+                    with self.assertRaises(ConversionError):
+                        convert(self.input_dir, self.output_dir)
+                self.assertIn(str(source), logs.output[0])
                 self.assertFalse(self.output.exists())
                 previous = self.prepare_existing_output()
-                with self.assertRaises(ConversionError) as error:
-                    convert(self.input_dir, self.output_dir)
-                self.assertIn(str(source), str(error.exception))
+                with self.assertLogs("src.convert", level="ERROR") as logs:
+                    with self.assertRaises(ConversionError):
+                        convert(self.input_dir, self.output_dir)
+                self.assertIn(str(source), logs.output[0])
                 self.assertEqual(self.output.read_bytes(), previous)
                 self.assertEqual(list(self.output_dir.iterdir()), [self.output])
                 source.unlink()
@@ -148,18 +151,21 @@ class ConvertTests(unittest.TestCase):
                 source.unlink()
                 self.output.unlink()
 
-    def test_malformed_csv_makes_convert_raise_csv_error(self):
-        """Malformed CSV raises csv.Error and preserves output."""
+    def test_malformed_csv_is_skipped_and_preserves_output(self):
+        """Malformed CSV is logged and skipped; a batch of only bad files fails."""
         for name, line in (("bad_quote.csv", 2), ("unterminated_quote.csv", 3)):
             with self.subTest(fixture=name):
                 source = self.copy_fixture(name)
-                with self.assertRaises(csv.Error):
-                    convert(self.input_dir, self.output_dir)
+                with self.assertLogs("src.convert", level="ERROR") as logs:
+                    with self.assertRaises(ConversionError):
+                        convert(self.input_dir, self.output_dir)
+                self.assertIn(f"{source}: line {line}:", logs.output[0])
                 self.assertFalse(self.output.exists())
                 previous = self.prepare_existing_output()
-                with self.assertRaises(csv.Error) as error:
-                    convert(self.input_dir, self.output_dir)
-                self.assertIn(f"{source}: line {line}:", str(error.exception))
+                with self.assertLogs("src.convert", level="ERROR") as logs:
+                    with self.assertRaises(ConversionError):
+                        convert(self.input_dir, self.output_dir)
+                self.assertIn(f"{source}: line {line}:", logs.output[0])
                 self.assertEqual(self.output.read_bytes(), previous)
                 self.assertEqual(list(self.output_dir.iterdir()), [self.output])
                 source.unlink()
@@ -214,14 +220,63 @@ class ConvertTests(unittest.TestCase):
         self.assertEqual(len(second_logs.records), 3)
         self.assertEqual(sorted(self.output_dir.iterdir()), outputs)
 
-    def test_batch_stops_at_first_file_failure(self):
-        """A batch stops at the first file failure."""
+    def test_one_file_fails_another_succeeds(self):
+        """One bad file is skipped with a logged error; the rest of the batch still succeeds."""
         self.copy_fixture("variants_clean.csv", "a.csv")
         self.copy_fixture("missing_header.csv", "b.csv")
         self.copy_fixture("variants_clean.csv", "c.csv")
+        with self.assertLogs("src.convert", level="ERROR") as logs:
+            outputs = convert(self.input_dir, self.output_dir)
+        self.assertEqual(outputs, [self.output_dir / "a.json", self.output_dir / "c.json"])
+        self.assertEqual(sorted(path.name for path in self.output_dir.iterdir()), ["a.json", "c.json"])
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("b.csv", logs.output[0])
+
+    def test_all_files_failing_raises_conversion_error(self):
+        """A batch where every input file fails to convert fails the stage."""
+        self.copy_fixture("missing_header.csv", "a.csv")
+        self.copy_fixture("bad_quote.csv", "b.csv")
+        with self.assertLogs("src.convert", level="ERROR") as logs:
+            with self.assertRaises(ConversionError):
+                convert(self.input_dir, self.output_dir)
+        self.assertEqual(len(logs.records), 2)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_zero_variant_file_counts_as_a_successful_output(self):
+        """A file with a valid header but zero valid rows is still a successful conversion."""
+        self.copy_fixture("header_only.csv", "only.csv")
+        outputs = convert(self.input_dir, self.output_dir)
+        self.assertEqual(outputs, [self.output_dir / "only.json"])
+        payload = json.loads((self.output_dir / "only.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["row_count"], 0)
+        self.assertEqual(payload["variants"], [])
+
+    def test_write_failure_after_earlier_success_stops_the_batch(self):
+        """An output-write failure aborts the batch immediately, not as a skippable input error."""
+        self.copy_fixture("variants_clean.csv", "a.csv")
+        self.copy_fixture("variants_clean.csv", "b.csv")
+        real_replace = Path.replace
+
+        def fail_on_b(self_path, target):
+            if self_path.name.startswith("b.json"):
+                raise OSError("disk full")
+            return real_replace(self_path, target)
+
+        with patch.object(Path, "replace", autospec=True, side_effect=fail_on_b):
+            with self.assertRaises(OSError):
+                convert(self.input_dir, self.output_dir)
+        self.assertEqual([path.name for path in self.output_dir.iterdir()], ["a.json"])
+
+    def test_preexisting_output_does_not_mask_a_zero_success_batch(self):
+        """A stale file already in output_dir must not turn a zero-success run into a success."""
+        self.copy_fixture("missing_header.csv", "bad.csv")
+        self.output_dir.mkdir()
+        stale = self.output_dir / "leftover.json"
+        stale.write_text('{"source_file": "old.csv", "row_count": 0, "skipped_rows": 0, "variants": []}',
+                          encoding="utf-8")
         with self.assertRaises(ConversionError):
             convert(self.input_dir, self.output_dir)
-        self.assertEqual([path.name for path in self.output_dir.iterdir()], ["a.json"])
+        self.assertEqual([path.name for path in self.output_dir.iterdir()], ["leftover.json"])
 
     def test_missing_input_or_empty_batch(self):
         """Missing input or an empty batch raises ConversionError."""
@@ -231,13 +286,15 @@ class ConvertTests(unittest.TestCase):
         self.assertFalse(self.output_dir.exists())
 
     def test_invalid_utf8_preserves_output(self):
-        """Invalid UTF-8 preserves existing output."""
+        """Invalid UTF-8 is skipped like any other file-level input error; existing output is kept."""
         source = self.input_dir / "encoding.csv"
         self.output = self.output_dir / "encoding.json"
         source.write_bytes(b"index,CHROM,POS,REF,ALT\n\xff,chr1,10,A,T\n")
         previous = self.prepare_existing_output()
-        with self.assertRaises(UnicodeError):
-            convert(self.input_dir, self.output_dir)
+        with self.assertLogs("src.convert", level="ERROR") as logs:
+            with self.assertRaises(ConversionError):
+                convert(self.input_dir, self.output_dir)
+        self.assertIn(str(source), logs.output[0])
         self.assertEqual(self.output.read_bytes(), previous)
 
     def test_output_symlink_to_input_makes_convert_raise_conversion_error(self):
@@ -269,12 +326,14 @@ class ConvertTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), original)
 
     def test_read_permission_failure_preserves_output(self):
-        """Read permission failure preserves existing output."""
+        """A read permission failure is a skippable input error; existing output is preserved."""
         source = self.copy_fixture("variants_clean.csv")
         previous = self.prepare_existing_output()
         with patch.object(Path, "open", side_effect=PermissionError("read denied")):
-            with self.assertRaises(PermissionError):
-                convert(self.input_dir, self.output_dir)
+            with self.assertLogs("src.convert", level="ERROR") as logs:
+                with self.assertRaises(ConversionError):
+                    convert(self.input_dir, self.output_dir)
+        self.assertIn(str(source), logs.output[0])
         self.assertEqual(self.output.read_bytes(), previous)
 
     def test_output_creation_failures_preserve_output(self):

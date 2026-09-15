@@ -87,7 +87,10 @@ def process_file(
         if sleep_duration > 0:
             time.sleep(sleep_duration)
 
-    except Exception as err:
+    except (OSError, ValueError) as err:
+        # Expected input problems (unreadable file, malformed JSON, missing or
+        # invalid schema fields). Anything else is a programming error and
+        # must propagate, not be disguised as a per-file failure.
         status = "FAILED"
         row_count = 0
         skipped_row_count = 0
@@ -116,7 +119,15 @@ def process(
     output_dir: Path,
     sleep_duration: Optional[float] = None,
 ) -> list[dict]:
-    """Iterate through all Stage 1 JSON files, process them, and write metrics."""
+    """Iterate through all Stage 1 JSON files, process them, and write metrics.
+
+    A file that fails to read or validate is recorded with status FAILED and
+    does not stop the rest of the batch; an unexpected error or a failure
+    while writing an output still propagates and aborts the batch immediately.
+    The batch fails - raising ValueError after writing whatever per-file
+    metrics it could - if zero files succeed, including when input_dir has no
+    eligible *.json files at all.
+    """
     resolved_sleep = (
         get_sleep_duration() if sleep_duration is None else validate_sleep_duration(sleep_duration)
     )
@@ -127,12 +138,15 @@ def process(
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     input_files = sorted(input_dir.glob("*.json"))
-    if not input_files:
-        sys.stdout.write(f"WARNING: No JSON files found in {input_dir}\n")
-        sys.stdout.flush()
-        return []
+    results = [process_file(input_file, output_dir, resolved_sleep) for input_file in input_files]
 
-    return [process_file(input_file, output_dir, resolved_sleep) for input_file in input_files]
+    succeeded = sum(1 for result in results if result["status"] == "SUCCESS")
+    if succeeded == 0:
+        sys.stdout.write(f"ERROR: No files processed successfully from {input_dir}\n")
+        sys.stdout.flush()
+        raise ValueError(f"No files processed successfully from {input_dir}")
+
+    return results
 
 
 def main(argv: Optional[list[str]] = None) -> int:

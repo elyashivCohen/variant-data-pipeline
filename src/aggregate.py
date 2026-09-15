@@ -66,9 +66,29 @@ def count_variants_by_chromosome(convert_dir: Path, filenames: list[str]) -> dic
     return counts
 
 
+def verify_process_covers_convert_outputs(convert_dir: Path, results: list[dict]) -> None:
+    """Every current-run Convert output must have a Process outcome (SUCCESS or FAILED).
+
+    A Convert output Process never even attempted is a broken pairing between
+    the two directories, not a normal partial-success outcome, so it fails
+    aggregation rather than silently vanishing from the summary.
+    """
+    if not convert_dir.is_dir():
+        raise FileNotFoundError(f"Convert directory not found: {convert_dir}")
+
+    convert_filenames = {path.name for path in convert_dir.glob("*.json") if path.is_file()}
+    process_filenames = {r["input_file"] for r in results}
+    missing = sorted(convert_filenames - process_filenames)
+    if missing:
+        raise ValueError(
+            f"Convert output(s) in {convert_dir} have no Process outcome: {', '.join(missing)}"
+        )
+
+
 def aggregate(convert_dir: Path, process_dir: Path) -> dict:
     """Combine Stage 1 and Stage 2 outputs into one pipeline summary."""
     results = read_process_results(process_dir)
+    verify_process_covers_convert_outputs(convert_dir, results)
 
     successful_filenames = [r["input_file"] for r in results if r["status"] == "SUCCESS"]
     chromosome_counts = count_variants_by_chromosome(convert_dir, successful_filenames)
