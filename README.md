@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert is implemented; Process, Aggregate, and orchestration remain planned.
+This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert and Process are implemented; Aggregate and orchestration remain planned.
 
 ## 2. Requirements
 
@@ -44,7 +44,7 @@ Aggregate
 output/summary.json
 ```
 
-Convert will validate rows and record valid variants, source-file identity, and row counts. Process will apply the delay and produce status, timing metrics, and the data needed for aggregation. Aggregate will produce the final summary.
+Convert validates rows and records valid variants, source-file identity, and row counts. Process applies the delay and produces status, timing metrics, and the data needed for aggregation. Aggregate will produce the final summary.
 
 The local design uses sequential stage execution and a configurable Process delay for tests and development, retaining the 30-second default. All three stages are planned for containerization, with Docker Compose as the likely local runner. These are design choices, not assignment requirements.
 
@@ -119,3 +119,37 @@ The suite checks exact JSON records and accepted/skipped counts, warnings and co
 The readable summary counts successful test methods as passes and each failure, error, or skip event separately, including subtest events. A parent with a failed subtest is never reported as passed; several unsuccessful subtests can make event totals exceed the number of test methods. Expected failures are labeled and counted as skips; unexpected successes count as failures. Exit status is 0 when unittest reports success and 1 otherwise.
 
 Verification on Windows with Python 3.13.14: the readable runner ran 23 tests in 0.329 seconds; standard unittest ran 23 tests in 0.319 seconds. Each reported 22 passed, 0 failures, 0 errors, and one symbolic-link test skipped because Windows denied permission (exit code 0). Python 3.9 was not tested. The multiline CSV test writes through `Path.open` with `newline=""` to prevent Windows newline translation while retaining Python 3.9 compatibility.
+
+## 11. Process Stage
+
+Requires Python 3.9 or later and uses only the standard library. From the repository root:
+
+```sh
+python -m src.process --input-dir data/converted --output-dir data/processed --sleep-seconds 0
+```
+
+Omit `--sleep-seconds` for the default 30-second simulated compute delay. The delay can also be set with the `PROCESS_SLEEP_SECONDS` environment variable; `--sleep-seconds` takes precedence when both are given. Input and output paths are configurable; defaults are `data/converted` and `data/processed`.
+
+`process_file(input_path: Path, output_dir: Path, sleep_duration=None) -> dict` processes one Stage 1 JSON file and returns its metrics. `process(input_dir: Path, output_dir: Path, sleep_duration=None) -> list[dict]` processes every `*.json` file directly inside the input directory, in sorted order, sequentially, writing one metrics file per input.
+
+Each output is a JSON object, written to `<output-dir>/<input filename>`, containing:
+
+```json
+{
+  "input_file": "example.json",
+  "status": "SUCCESS",
+  "start_time": "2026-09-14T10:00:00.000000+00:00",
+  "end_time": "2026-09-14T10:00:30.002123+00:00",
+  "duration_seconds": 30.002123,
+  "row_count": 3,
+  "skipped_row_count": 1
+}
+```
+
+`row_count` and `skipped_row_count` are read directly from the Stage 1 output's `row_count` and `skipped_rows` fields. `duration_seconds` is measured with `time.monotonic()` around reading, validation, and the simulated sleep.
+
+Files are processed independently. If one file fails — missing file, malformed JSON, or missing/invalid `row_count`/`skipped_rows` — it is recorded with `status: "FAILED"`, `row_count: 0`, `skipped_row_count: 0`, and an `ERROR` line on stdout, and the batch continues to the next file. A single bad input does not stop the rest of the batch from being processed.
+
+`variant_counts_by_chromosome` is **not** produced by this stage. Per-chromosome variant counts, total variant and skipped-row counts, total processing time, and the list of processed input files are Stage 3 (Aggregate)'s responsibility, computed by combining every Stage 2 output into one summary file.
+
+The CLI exits with status 0 on success, 1 if the input directory is missing, and 2 for an invalid `--sleep-seconds` value or argparse usage errors.
