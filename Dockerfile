@@ -4,5 +4,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 COPY src/ src/
+COPY tests/ tests/
+COPY input/ input/
 
 ENTRYPOINT ["python", "-m"]

@@ -1,0 +1,85 @@
+# One-shot batch services for the three pipeline stages, chained by Compose's
+# own dependency graph (service_completed_successfully) - see README section
+# 13. This file is named docker-compose.pipeline.yml (not the Compose
+# default) and always invoked with `-f docker-compose.pipeline.yml`,
+# normally via run_pipeline.ps1, which allocates RUN_ID and passes it
+# through. Keeping it out of the auto-loaded docker-compose.yml (which holds
+# only the unrelated `tests` service, see that file) means running the tests
+# never triggers this file's `${RUN_ID:?...}` requirement - Compose
+# interpolates every service's variables in a file up front, regardless of
+# which service is targeted, so the two would otherwise conflict.
+#
+# RUN_ID is required (`${RUN_ID:?...}`) so a direct
+# `docker compose -f docker-compose.pipeline.yml run --rm <service>`
+# invocation, without the launcher, cannot silently reuse a stale value;
+# must be a plain directory name (letters, digits, "-", "_" only - no "/",
+# "\", or ".." segments).
+#
+# Layout on the host, all under one run's directory:
+#   output/<RUN_ID>/convert/    Convert's JSON output (written by convert)
+#   output/<RUN_ID>/process/    Process's metrics output (written by process)
+#   output/<RUN_ID>/aggregate/  Aggregate's summary.json (written by aggregate)
+#   output/<RUN_ID>/logs/       convert.log, process.log, aggregate.log
+
+services:
+  convert:
+    build: .
+    image: identifai-pipeline:latest
+    restart: "no"
+    command:
+      - src.convert
+      - --input-dir
+      - /app/input
+      - --output-dir
+      - /app/run/convert
+      - --log-file
+      - /app/run/logs/convert.log
+    volumes:
+      - ./input:/app/input:ro
+      - ./output/${RUN_ID:?RUN_ID must be set}/convert:/app/run/convert
+      - ./output/${RUN_ID:?RUN_ID must be set}/logs:/app/run/logs
+
+  process:
+    build: .
+    image: identifai-pipeline:latest
+    restart: "no"
+    depends_on:
+      convert:
+        condition: service_completed_successfully
+    environment:
+      - PROCESS_SLEEP_SECONDS
+    command:
+      - src.process
+      - --input-dir
+      - /app/run/convert
+      - --output-dir
+      - /app/run/process
+      - --log-file
+      - /app/run/logs/process.log
+    volumes:
+      - ./output/${RUN_ID:?RUN_ID must be set}/convert:/app/run/convert:ro
+      - ./output/${RUN_ID:?RUN_ID must be set}/process:/app/run/process
+      - ./output/${RUN_ID:?RUN_ID must be set}/logs:/app/run/logs
+
+  aggregate:
+    build: .
+    image: identifai-pipeline:latest
+    restart: "no"
+    depends_on:
+      process:
+        condition: service_completed_successfully
+    command:
+      - src.aggregate
+      - --convert-dir
+      - /app/run/convert
+      - --process-dir
+      - /app/run/process
+      - --output-file
+      - /app/run/aggregate/summary.json
+      - --log-file
+      - /app/run/logs/aggregate.log
+    volumes:
+      - ./output/${RUN_ID:?RUN_ID must be set}/convert:/app/run/convert:ro
+      - ./output/${RUN_ID:?RUN_ID must be set}/process:/app/run/process:ro
+      - ./output/${RUN_ID:?RUN_ID must be set}/aggregate:/app/run/aggregate
+      - ./output/${RUN_ID:?RUN_ID must be set}/logs:/app/run/logs

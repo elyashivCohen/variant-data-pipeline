@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert, Process, and Aggregate are implemented and containerized (§14); the pipeline runner that chains all three remains planned (§13).
+This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert, Process, and Aggregate are implemented and containerized (§14); the pipeline runner that chains all three is implemented (§13).
 
 ## 2. Requirements
 
@@ -11,7 +11,7 @@ This Software Engineering Intern take-home assignment builds a three-stage pipel
 - **Aggregate:** Combine processed results into one summary containing variant counts per chromosome, total variant count, total skipped rows, total processing time, and the list of processed input files.
 - Handle malformed input gracefully. Re-running the same inputs must not duplicate or corrupt data.
 - Include tests and containerize at least the Convert stage.
-- Provide a simple way to run the pipeline end-to-end, with no reviewer setup beyond Docker (per-stage containers are implemented and documented in §14; the single command that chains all three is still planned, see §13).
+- Provide a simple way to run the pipeline end-to-end, with no reviewer setup beyond Docker and Compose (per-stage containers are documented in §14; the single command that chains all three - `.\run_pipeline.ps1` - is implemented, see §13).
 - Document design decisions, assumptions, run instructions, AI workflow, and trade-offs.
 
 ## 3. Assumptions
@@ -194,19 +194,77 @@ Errors are surfaced the same way as Convert and Process: plain stdlib exceptions
 
 Aggregate recomputes the full summary from scratch on every run and overwrites `--output-file` using the same shared atomic write helper as Convert and Process (`src/json_io.py`); rerunning with unchanged inputs reproduces an identical file, with no accumulation across runs and no risk of a partially written summary.
 
-## 13. Orchestration (Planned)
+## 13. Quick Start: Running the Pipeline (Docker + Compose only)
 
-The pipeline runner itself is not implemented yet - §14 documents running each container manually, one at a time, checking its exit code before starting the next. Run-directory isolation (§14) and per-stage log files (§6) already exist; what remains is a single command that chains all three. Each stage's own CLI exit code is already the authoritative, tested signal of that stage's outcome (0 = success, including success with skipped/FAILED files; 1 = the stage failed; 2 = usage error, including an unopenable `--log-file`) - no stage parses another stage's logs or output to decide whether it may proceed. A future runner must use exactly this signal: **run Convert, wait for it to exit, and only start Process if Convert exited 0; run Process, wait for it to exit, and only start Aggregate if Process exited 0; if any stage exits nonzero, the runner must stop the pipeline there and itself exit nonzero, without starting the next stage.**
+No host Python is required to run the pipeline or its tests - only Docker Desktop (or engine) with Compose v2. `run_pipeline.ps1` is a small PowerShell launcher; it does not run any stage itself or duplicate Compose's own sequencing - it only allocates a run directory and invokes one `docker compose` command, which is the sole implementation of stage ordering (via `depends_on` / `condition: service_completed_successfully` in `docker-compose.pipeline.yml`, §14).
 
-## 14. Running the Pipeline in Docker
+### Run the full pipeline
+
+```powershell
+.\run_pipeline.ps1
+```
+
+This allocates the next `run_<N>` directory, prints the RUN_ID and its output path, then runs:
+
+```powershell
+docker compose -f docker-compose.pipeline.yml up --build --force-recreate
+```
+
+with `RUN_ID` set to that value, and exits with that command's own exit code.
+
+### Run ID numbering
+
+- Runs are numbered `run_1`, `run_2`, `run_3`, ... under `output/`.
+- Before allocating, the launcher lists `output/`, keeps only entries matching `run_<number>` exactly, and ignores everything else (other files, other directory names). The next ID is the highest existing number plus 1, or `run_1` if none exist. For example, `run_1`, `run_2`, `run_5` present → the next run is `run_6`.
+- There is no separate counter file - numbering is derived fresh from the directories present each time, so deleting all `run_<N>` directories naturally resets it back to `run_1`.
+- The ID is allocated once per invocation and passed to Convert, Process, and Aggregate as the same `RUN_ID`; each stage reads/writes only `output/<RUN_ID>/...` (see the mount table in §14) and never touches another run's directory.
+- The launcher creates `output/run_<N>/` itself, without overwriting an existing directory of that name; if creation fails (for example, a race with another invocation - see below), it reports the error and stops before touching Docker.
+- **Sequential local use only.** Two launcher invocations racing to allocate at the same moment are unsupported - the scan-then-create step is not locked against concurrent launches. Run one at a time.
+
+### Run the tests
+
+```
+docker compose run --build --rm tests
+```
+
+This is a separate one-shot service, gated behind Compose's `test` profile so it never starts as part of running the pipeline. It has no `RUN_ID`, no volumes (real `input/`/`output/` data is never touched - the image carries its own baked-in copy of `input/` and `tests/` for this purpose), and no dependency on the pipeline services, so it works from a fresh shell with no `RUN_ID` set. It runs `tests/run_tests.py` inside the image and exits nonzero on any test failure. This is unit-test verification only - it does not exercise real Docker orchestration; that's what the command above (and §14's Verification) covers.
+
+### Output and log locations
+
+```
+output/run_<N>/convert/    Convert's JSON output
+output/run_<N>/process/    Process's metrics output
+output/run_<N>/aggregate/  Aggregate's summary.json
+output/run_<N>/logs/       convert.log, process.log, aggregate.log
+```
+
+### Rerun behavior
+
+The launcher always allocates a brand-new `run_<N>` - there is no "reuse" case in the normal flow, so nothing is ever cleared or overwritten by running it again. Manually re-invoking a single stage against an *existing* RUN_ID (§14, for debugging) replaces only that stage's own JSON output and appends to its own log file, using the same atomic-write behavior documented since M2/M3 - unrelated to run numbering, and it never touches another stage's or another run's files.
+
+### Exit codes (as verified against real Docker - see §14 Verification)
+
+- `docker compose up --build --force-recreate` (what the launcher runs) exits **0** only when Convert, Process, and Aggregate all completed successfully, in that order.
+- If Convert or Process exits nonzero, Compose reports `service "<name>" didn't complete successfully: exit <code>`, never starts the dependent service(s), and its own exit code is nonzero - the launcher propagates that same nonzero code.
+- Individual stage exit codes (0/1/2 - see §6, §11, §12) are **not** distinguished in the launcher's own final exit code; only "zero on full success, nonzero otherwise" is guaranteed. Check `output/<RUN_ID>/logs/*.log` for which stage failed and why.
+- `--force-recreate` is deliberate, not cosmetic: without it, a previously-exited container could in principle be reused instead of recreated for the new `RUN_ID`'s bind mounts, relying on Compose's own change-detection instead of a guarantee. This was verified directly (§14) - repeated launches produce fresh `Recreate`/`Recreated` containers and correct per-run output every time.
+- `--abort-on-container-exit` / `--exit-code-from` are deliberately **not** used: both treat *any* container exiting as a signal to tear the whole run down, which would abort the pipeline the moment Convert (the first one-shot container) exits successfully, before Process or Aggregate ever start. Plain `docker compose up` was verified to complete the full chain and to return the correct exit code in both the success and failure cases without them.
+
+### Future Scaling (design note, not implemented)
+
+This version processes one local dataset per invocation, numbered sequentially on a single machine. Scaling to multiple independent datasets would need: explicit dataset/job IDs as the output namespace, instead of a local `run_<N>` counter; stage outputs persisted to shared/object storage, with queue messages carrying references and metadata rather than full payloads; multiple workers pulling independent jobs off that queue; and retries that are idempotent/deduplicated, with Aggregate needing an explicit signal that all expected Process outcomes for a job are present, rather than today's directory-listing check. None of this - queues, workers, object storage, distributed coordination - is implemented; today's numbered local directories are a convenience for this single-machine version, not a preview of that design.
+
+## 14. Manual Stage Commands (debugging reference)
+
+The three pipeline stages live in `docker-compose.pipeline.yml` (not the default `docker-compose.yml`, which holds only the unrelated `tests` service - see §13). They're kept in separate files because Compose interpolates every service's variables in a file up front, regardless of which service is targeted; keeping `${RUN_ID:?...}` out of the default file is what lets `docker compose run --build --rm tests` work with no `RUN_ID` set. This section documents that pipeline file directly - useful for running or debugging one stage at a time - and is what `run_pipeline.ps1` itself invokes as a single `docker compose up` call.
 
 ### Design
 
-One shared `Dockerfile` (`python:3.12-slim`, stdlib only, `COPY src/ src/`, `ENTRYPOINT ["python", "-m"]`) and one `docker-compose.yml` defining three independent one-shot services - `convert`, `process`, `aggregate` - each supplying its own `command:` (the module to run and its arguments) against that same image. Compose builds the image once and reuses it for all three services. Each service is meant to be run individually with `docker compose run --rm <service>`, **not** `docker compose up` - there is no dependency chaining or automatic sequencing in Compose itself; that is the runner's job (§13), deliberately not built here. `restart: "no"` is set explicitly on every service: these are batch jobs that exit when the stage completes, not long-running processes.
+One shared `Dockerfile` (`python:3.12-slim`, stdlib only, `COPY src/ src/`, `COPY tests/ tests/`, `COPY input/ input/`, `ENTRYPOINT ["python", "-m"]`) backs all four services across both Compose files. In `docker-compose.pipeline.yml`, `process` declares `depends_on: convert: condition: service_completed_successfully` and `aggregate` likewise depends on `process` - this dependency graph is the only implementation of stage sequencing (§13); nothing else re-implements it. `restart: "no"` is set on every service: these are batch jobs that exit when the stage completes, not long-running processes.
 
 ### Directory layout and mounts
 
-Every pipeline invocation uses a `RUN_ID` you choose, giving each run its own directory tree on the host:
+Every pipeline invocation uses a `RUN_ID` (normally a `run_<N>` value allocated by the launcher, §13), giving each run its own directory tree on the host:
 
 ```
 output/<RUN_ID>/convert/    Convert's JSON output
@@ -223,27 +281,27 @@ output/<RUN_ID>/logs/       convert.log, process.log, aggregate.log
 | `process` | `output/<RUN_ID>/convert/` (ro) | `output/<RUN_ID>/process/`, `output/<RUN_ID>/logs/` |
 | `aggregate` | `output/<RUN_ID>/convert/` (ro), `output/<RUN_ID>/process/` (ro) | `output/<RUN_ID>/aggregate/`, `output/<RUN_ID>/logs/` |
 
-`docker-compose.yml` requires `RUN_ID` via `${RUN_ID:?RUN_ID must be set}` on every mount path: an unset or empty `RUN_ID` makes Compose refuse to run with a clear error, before any container starts. **`RUN_ID` must be a plain, single directory-name-safe token** - letters, digits, `-`, and `_` only, no `/`, `\`, or `..` segments. Compose only checks that it is set and nonempty, not its shape; stricter format validation is deferred to the runner (§13). Since Git does not track empty directories, create the run's directories explicitly before the first `docker compose run` for a given `RUN_ID` (Docker Desktop's bind-mount auto-create behavior is not relied on or claimed here, since it could not be verified without Docker available - see Verification below).
+`docker-compose.pipeline.yml` requires `RUN_ID` via `${RUN_ID:?RUN_ID must be set}` on every mount path: an unset or empty `RUN_ID` makes Compose refuse to run with a clear error, before any container starts - this is deliberate, so a direct invocation without the launcher cannot silently reuse a stale or default directory. **`RUN_ID` must be a plain, single directory-name-safe token** - letters, digits, `-`, and `_` only, no `/`, `\`, or `..` segments (the launcher's own `run_<N>` values always satisfy this). Since Git does not track empty directories, create the run's directories explicitly before the first `docker compose run` for a given `RUN_ID` (the launcher does this automatically; the manual commands below do it with `mkdir`/`New-Item`).
 
 ### Commands
 
 **PowerShell:**
 
 ```powershell
-$env:RUN_ID = "run1"
+$env:RUN_ID = "run_1"
 New-Item -ItemType Directory -Force -Path `
   "output/$env:RUN_ID/convert", "output/$env:RUN_ID/process", `
   "output/$env:RUN_ID/aggregate", "output/$env:RUN_ID/logs" | Out-Null
 
-docker compose build
+docker compose -f docker-compose.pipeline.yml build
 
-docker compose run --rm convert
+docker compose -f docker-compose.pipeline.yml run --rm convert
 if ($LASTEXITCODE -ne 0) { throw "Convert failed" }
 
-docker compose run --rm process
+docker compose -f docker-compose.pipeline.yml run --rm process
 if ($LASTEXITCODE -ne 0) { throw "Process failed" }
 
-docker compose run --rm aggregate
+docker compose -f docker-compose.pipeline.yml run --rm aggregate
 if ($LASTEXITCODE -ne 0) { throw "Aggregate failed" }
 
 Get-Content "output/$env:RUN_ID/aggregate/summary.json"
@@ -252,46 +310,42 @@ Get-Content "output/$env:RUN_ID/aggregate/summary.json"
 **Bash:**
 
 ```bash
-export RUN_ID=run1
+export RUN_ID=run_1
 mkdir -p "output/$RUN_ID"/{convert,process,aggregate,logs}
 
-docker compose build
+docker compose -f docker-compose.pipeline.yml build
 
-docker compose run --rm convert   || { echo "Convert failed"; exit 1; }
-docker compose run --rm process   || { echo "Process failed"; exit 1; }
-docker compose run --rm aggregate || { echo "Aggregate failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --rm convert   || { echo "Convert failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --rm process   || { echo "Process failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --rm aggregate || { echo "Aggregate failed"; exit 1; }
 
 cat "output/$RUN_ID/aggregate/summary.json"
 ```
 
-Each command must be run only after the previous one has exited 0 - there is no automatic gating in Compose itself (§13); the exit-code checks above are how a reviewer (or the future runner) enforces that manually.
-
-A different `RUN_ID` starts a completely independent run with its own directories; nothing from a previous `RUN_ID` is read, written, or overwritten.
+`docker compose run --rm <service>` always creates a fresh, ephemeral container, so these manual commands don't need `--force-recreate` the way `up` does (§13). A different `RUN_ID` starts a completely independent run with its own directories; nothing from a previous `RUN_ID` is read, written, or overwritten.
 
 ### Configuring the delay and logs
 
 `PROCESS_SLEEP_SECONDS` passes through from the host shell (declared in `process`'s `environment:` as a bare name) - unset, Process keeps its default 30-second simulated delay unchanged. For a fast smoke test only:
 
 ```bash
-PROCESS_SLEEP_SECONDS=0 docker compose run --rm process
+PROCESS_SLEEP_SECONDS=0 docker compose -f docker-compose.pipeline.yml run --rm process
 ```
 ```powershell
-$env:PROCESS_SLEEP_SECONDS = "0"; docker compose run --rm process; Remove-Item Env:\PROCESS_SLEEP_SECONDS
+$env:PROCESS_SLEEP_SECONDS = "0"; docker compose -f docker-compose.pipeline.yml run --rm process; Remove-Item Env:\PROCESS_SLEEP_SECONDS
 ```
 
-Each container already writes `--log-file /app/run/logs/<stage>.log` (see §6) into the mounted `output/<RUN_ID>/logs/` directory, in addition to its normal console output, which `docker logs` (or the terminal, for `docker compose run`) captures either way.
+Each container already writes `--log-file /app/run/logs/<stage>.log` (see §6) into the mounted `output/<RUN_ID>/logs/` directory, in addition to its normal console output, which `docker compose up`'s live streaming (or `docker logs`, for `run`) captures either way.
 
 ### Verification
 
 **Performed, with a real Docker installation (Docker 29.8.0, Compose v5.5.1 on Windows):**
-- `docker compose config` with `RUN_ID` set: resolved cleanly, all three services showing the expected image, command, and volumes.
-- `docker compose build`: succeeded, producing one shared `identifai-pipeline:latest` image used by all three services.
-- Full pipeline run against the real `input/*.csv` files, one `docker compose run --rm <service>` at a time, each gated on the previous stage's exit code: Convert produced 5 JSON files and exited 0; Process (with `PROCESS_SLEEP_SECONDS=0` for a fast smoke check) produced 5 metrics files and exited 0; Aggregate produced `summary.json` and exited 0. `summary.json` matched the known values exactly: 161 total variants across 24 chromosomes, 0 skipped rows, 5 `input_files_processed` entries.
-- Each stage's log file (`output/<RUN_ID>/logs/<stage>.log`) was created on the host with the correct logger name (`src.convert`, `src.process`, `src.aggregate` - not `__main__`) and timestamps, alongside identical console output.
-- Rerunning Convert with the same `RUN_ID`: the log file grew (appended, not overwritten - line count roughly doubled) and the JSON outputs were cleanly replaced, staying at 5 files with no duplication.
-- A second, independent `RUN_ID`: ran the full pipeline again end to end (same 161/24/0 result) while the first run's output and log files remained byte-for-byte untouched - confirmed full isolation between run directories.
-- A missing `RUN_ID`: `docker compose run --rm convert` with `RUN_ID` unset failed immediately with Compose's `RUN_ID must be set` interpolation error, exit code 1, before any container was created.
-- An invalid-input run (a throwaway input directory containing only a CSV missing the required `ALT` header, bind-mounted in place of `input/`): Convert exited 1, logged one `ERROR` line to both console and file identifying the file and the missing column, and wrote no output file - matching the batch-fails-when-nothing-succeeds policy from M2, now confirmed inside an actual container.
-- Full Python test suite: `python -B tests/run_tests.py` - all tests pass except the one pre-existing, unrelated Windows symlink-privilege skip (see §10).
+- `docker compose run --build --rm tests` from a fresh shell with `RUN_ID` unset: succeeded, 71/71 tests passed inside the container - confirming the default `docker-compose.yml`'s lack of a `RUN_ID` reference actually avoids the cross-file interpolation error (a direct `${RUN_ID:?...}` reference in the *same* file as `tests` was tried first and reproducibly failed for exactly this reason before the two-file split).
+- `docker compose config --services` (default file): printed nothing, since `tests` is the only service and sits behind an unactivated profile - confirms plain `docker compose up` cannot start it.
+- `.\run_pipeline.ps1` end to end: allocated `run_1`, built the image, ran Convert → Process → Aggregate in order with live streamed per-service logs, and exited 0; `summary.json` matched the known values exactly (161 variants, 24 chromosomes, 0 skipped rows, 5 files).
+- A second launcher invocation: allocated `run_2` (ignoring an unrelated pre-existing `output/manual-test-1` directory), ran to completion independently, and left `run_1`'s output and log files byte-for-byte unchanged (verified by hash). Compose logged `Container ... Recreate` / `Recreated` for all three services on this second run, confirming `--force-recreate` is doing real work - not silently skipped because Compose thought nothing had changed.
+- With `output/run_1`, `run_2`, and a manually created empty `output/run_5` present: the next launcher invocation allocated `run_6`, exactly as specified.
+- An invalid Convert input (a CSV missing the required `ALT` header, temporarily substituted for `input/`): Convert exited 1; Compose reported `service "convert" didn't complete successfully: exit 1` and never started Process or Aggregate (their output directories stayed empty); the launcher's own exit code was 1.
+- Full Python test suite, run directly on the host for convenience (distinct from the containerized `tests` service above): `python -B tests/run_tests.py` - 71 tests, 70 passed, 1 pre-existing unrelated skip (see §10).
 
-Every item that was previously listed as blocked and unverified - `docker compose build` succeeding, containers actually starting and round-tripping exit codes, bind mounts (including read-only source mounts) working as configured, and Compose's `${RUN_ID:?...}` guard firing on a real unset variable - has now been exercised directly and passed. This milestone is fully verified, not just reviewed by eye.
+All throwaway verification artifacts (`output/run_*`, the temporary `input/` swap, the pre-existing `output/manual-test-1`) were removed after verification; `output/` is gitignored and empty in the repository.

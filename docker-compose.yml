@@ -1,69 +1,23 @@
-# One-shot batch services for the three pipeline stages. Each is meant to be
-# run individually with `docker compose run --rm <service>`, not with
-# `docker compose up` - there is no orchestration here (that is a later
-# milestone). RUN_ID is required and must be set to a plain directory name
-# (letters, digits, "-", "_" only - no "/", "\", or ".." segments); see the
-# README for exact commands and how to set it in PowerShell/Bash.
+# The default, auto-loaded Compose file - deliberately holds only the
+# `tests` service, so `docker compose run --build --rm tests` works from a
+# fresh shell with no RUN_ID set. The three pipeline stages live in
+# docker-compose.pipeline.yml instead, because Compose interpolates every
+# service's variables in a file up front, regardless of which service is
+# targeted; if the pipeline's required `${RUN_ID:?...}` mounts were in this
+# same file, this tests command would fail before RUN_ID is ever relevant.
 #
-# Layout on the host, all under one run's directory:
-#   output/<RUN_ID>/convert/    Convert's JSON output (written by convert)
-#   output/<RUN_ID>/process/    Process's metrics output (written by process)
-#   output/<RUN_ID>/aggregate/  Aggregate's summary.json (written by aggregate)
-#   output/<RUN_ID>/logs/       convert.log, process.log, aggregate.log
+# `tests` runs the Python unit test suite (tests/run_tests.py) inside the
+# image - no RUN_ID, no volumes (real input/output data is never touched),
+# no dependency on the pipeline services, no Docker socket. It is gated
+# behind the "test" profile so it never starts as part of running the
+# pipeline (see docker-compose.pipeline.yml / README section 13).
 
 services:
-  convert:
+  tests:
     build: .
     image: identifai-pipeline:latest
-    restart: "no"
-    command:
-      - src.convert
-      - --input-dir
-      - /app/input
-      - --output-dir
-      - /app/run/convert
-      - --log-file
-      - /app/run/logs/convert.log
-    volumes:
-      - ./input:/app/input:ro
-      - ./output/${RUN_ID:?RUN_ID must be set}/convert:/app/run/convert
-      - ./output/${RUN_ID:?RUN_ID must be set}/logs:/app/run/logs
-
-  process:
-    build: .
-    image: identifai-pipeline:latest
-    restart: "no"
-    environment:
-      - PROCESS_SLEEP_SECONDS
-    command:
-      - src.process
-      - --input-dir
-      - /app/run/convert
-      - --output-dir
-      - /app/run/process
-      - --log-file
-      - /app/run/logs/process.log
-    volumes:
-      - ./output/${RUN_ID:?RUN_ID must be set}/convert:/app/run/convert:ro
-      - ./output/${RUN_ID:?RUN_ID must be set}/process:/app/run/process
-      - ./output/${RUN_ID:?RUN_ID must be set}/logs:/app/run/logs
-
-  aggregate:
-    build: .
-    image: identifai-pipeline:latest
-    restart: "no"
-    command:
-      - src.aggregate
-      - --convert-dir
-      - /app/run/convert
-      - --process-dir
-      - /app/run/process
-      - --output-file
-      - /app/run/aggregate/summary.json
-      - --log-file
-      - /app/run/logs/aggregate.log
-    volumes:
-      - ./output/${RUN_ID:?RUN_ID must be set}/convert:/app/run/convert:ro
-      - ./output/${RUN_ID:?RUN_ID must be set}/process:/app/run/process:ro
-      - ./output/${RUN_ID:?RUN_ID must be set}/aggregate:/app/run/aggregate
-      - ./output/${RUN_ID:?RUN_ID must be set}/logs:/app/run/logs
+    profiles: ["test"]
+    entrypoint:
+      - python
+      - -B
+      - tests/run_tests.py
