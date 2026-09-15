@@ -283,18 +283,15 @@ Each container already writes `--log-file /app/run/logs/<stage>.log` (see §6) i
 
 ### Verification
 
-**Performed (no Docker available in this environment - `docker`/`docker compose` were checked on the Windows host, in Git Bash, and inside the machine's only WSL distribution, and found on none of them):**
-- Full test suite: `python -B tests/run_tests.py` - all tests pass except the one pre-existing, unrelated Windows symlink-privilege skip (see §10).
-- A local dry run of the exact commands each container executes (`python -m src.convert/.process/.aggregate` with the same arguments the Compose `command:` blocks use), against the real `input/*.csv` files, using the `output/<RUN_ID>/...` layout: all three stages succeeded in order, `summary.json` matched the inputs (161 variants across 24 chromosomes, 0 skipped, from the five original CSVs), and each stage's log file was created with the correct stage/logger name and timestamp.
-- Rerun with the same directories: the log file grew by exactly one run's worth of lines (append, not overwrite or truncate) and the JSON outputs were cleanly replaced (not duplicated or corrupted).
-- A second, separate run directory: fully isolated from the first - no shared or overwritten files.
-- An invalid-input run (a fixture CSV with a missing required header, alone in the input directory): exited 1, logged one `ERROR` line to both console and file identifying the file and reason, and produced no output file - matching the batch-fails-when-nothing-succeeds policy from M2.
-- `Dockerfile`, `.dockerignore`, and `docker-compose.yml` were reviewed by hand for correctness (paths matching each stage's actual CLI flags, mount read/write modes matching the table above); this is not a substitute for an actual build.
+**Performed, with a real Docker installation (Docker 29.8.0, Compose v5.5.1 on Windows):**
+- `docker compose config` with `RUN_ID` set: resolved cleanly, all three services showing the expected image, command, and volumes.
+- `docker compose build`: succeeded, producing one shared `identifai-pipeline:latest` image used by all three services.
+- Full pipeline run against the real `input/*.csv` files, one `docker compose run --rm <service>` at a time, each gated on the previous stage's exit code: Convert produced 5 JSON files and exited 0; Process (with `PROCESS_SLEEP_SECONDS=0` for a fast smoke check) produced 5 metrics files and exited 0; Aggregate produced `summary.json` and exited 0. `summary.json` matched the known values exactly: 161 total variants across 24 chromosomes, 0 skipped rows, 5 `input_files_processed` entries.
+- Each stage's log file (`output/<RUN_ID>/logs/<stage>.log`) was created on the host with the correct logger name (`src.convert`, `src.process`, `src.aggregate` - not `__main__`) and timestamps, alongside identical console output.
+- Rerunning Convert with the same `RUN_ID`: the log file grew (appended, not overwritten - line count roughly doubled) and the JSON outputs were cleanly replaced, staying at 5 files with no duplication.
+- A second, independent `RUN_ID`: ran the full pipeline again end to end (same 161/24/0 result) while the first run's output and log files remained byte-for-byte untouched - confirmed full isolation between run directories.
+- A missing `RUN_ID`: `docker compose run --rm convert` with `RUN_ID` unset failed immediately with Compose's `RUN_ID must be set` interpolation error, exit code 1, before any container was created.
+- An invalid-input run (a throwaway input directory containing only a CSV missing the required `ALT` header, bind-mounted in place of `input/`): Convert exited 1, logged one `ERROR` line to both console and file identifying the file and the missing column, and wrote no output file - matching the batch-fails-when-nothing-succeeds policy from M2, now confirmed inside an actual container.
+- Full Python test suite: `python -B tests/run_tests.py` - all tests pass except the one pre-existing, unrelated Windows symlink-privilege skip (see §10).
 
-**Not verified - blocked by the lack of a local Docker installation, and not claimed as passing:**
-- `docker compose build` actually succeeding (base image pull, dependency resolution inside the container).
-- Any real `docker compose run` invocation - whether a container actually starts, whether its exit code round-trips correctly to the host, whether bind mounts (including read-only enforcement) behave as configured on this platform.
-- Compose's `${RUN_ID:?...}` behavior with a genuinely unset `RUN_ID` in a real Compose invocation.
-- `docker logs` / real-time console capture behavior for a running container.
-
-These require a working Docker installation on the reviewer's machine and are the next thing to check before relying on this milestone as fully proven.
+Every item that was previously listed as blocked and unverified - `docker compose build` succeeding, containers actually starting and round-tripping exit codes, bind mounts (including read-only source mounts) working as configured, and Compose's `${RUN_ID:?...}` guard firing on a real unset variable - has now been exercised directly and passed. This milestone is fully verified, not just reviewed by eye.
