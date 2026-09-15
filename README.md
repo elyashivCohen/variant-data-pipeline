@@ -2,7 +2,7 @@
 
 ## 1. Project Overview
 
-This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert and Process are implemented; Aggregate and orchestration remain planned.
+This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert, Process, and Aggregate are implemented; orchestration remains planned.
 
 ## 2. Requirements
 
@@ -44,7 +44,7 @@ Aggregate
 output/summary.json
 ```
 
-Convert validates rows and records valid variants, source-file identity, and row counts. Process applies the delay and produces status, timing metrics, and the data needed for aggregation. Aggregate will produce the final summary.
+Convert validates rows and records valid variants, source-file identity, and row counts. Process applies the delay and produces status, timing metrics, and the data needed for aggregation. Aggregate produces the final summary.
 
 The local design uses sequential stage execution and a configurable Process delay for tests and development, retaining the 30-second default. All three stages are planned for containerization, with Docker Compose as the likely local runner. These are design choices, not assignment requirements.
 
@@ -153,3 +153,33 @@ Files are processed independently. If one file fails — missing file, malformed
 `variant_counts_by_chromosome` is **not** produced by this stage. Per-chromosome variant counts, total variant and skipped-row counts, total processing time, and the list of processed input files are Stage 3 (Aggregate)'s responsibility, computed by combining every Stage 2 output into one summary file.
 
 The CLI exits with status 0 on success, 1 if the input directory is missing, and 2 for an invalid `--sleep-seconds` value or argparse usage errors.
+
+## 12. Aggregate Stage
+
+Requires Python 3.9 or later and uses only the standard library. From the repository root:
+
+```sh
+python -m src.aggregate --convert-dir data/converted --process-dir data/processed --output-file output/summary.json
+```
+
+Input and output paths are configurable; defaults are `data/converted`, `data/processed`, and `output/summary.json`.
+
+Aggregate reads from two directories rather than one. Stage 2's metrics files carry status, timing, and row/skipped-row counts but no per-variant data, so computing a chromosome breakdown requires reading Stage 1's `variants` arrays directly. Files are matched by identical filename between `--convert-dir` and `--process-dir` — Process always writes its output under the same filename it read from Convert, so this pairing is exact and requires no separate mapping.
+
+`aggregate(convert_dir: Path, process_dir: Path) -> dict` returns the summary object; `main()` writes it to `--output-file`. Example output:
+
+```json
+{
+  "variant_counts_by_chromosome": {"chr1": 2, "chr12": 1, "chr2": 1, "chr3": 1, "chrX": 2, "chrY": 2},
+  "total_variant_count": 9,
+  "total_skipped_rows": 3,
+  "total_processing_time_seconds": 0.000421,
+  "input_files_processed": ["variants_clean.json", "variants_messy.json"]
+}
+```
+
+`variant_counts_by_chromosome` and `total_variant_count` are computed only from files whose Stage 2 record has `status: "SUCCESS"`: a `FAILED` file didn't pass Stage 2's own validation, so its variant data isn't trusted for the final counts, and this also guarantees the per-chromosome values always sum exactly to `total_variant_count`. `total_skipped_rows` and `total_processing_time_seconds` sum across every Stage 2 record regardless of status, since a `FAILED` file still consumed real processing time and, per Stage 2's own behavior, always contributes zero skipped rows. `input_files_processed` lists every file Stage 2 attempted — `SUCCESS` and `FAILED` alike — in sorted filename order.
+
+Errors are surfaced the same way as Convert and Process: plain stdlib exceptions with a stdout `ERROR:` line, no custom exception type. A missing `--convert-dir` or `--process-dir`, an empty `--process-dir` (no `.json` files), or a `SUCCESS` record with no matching filename in `--convert-dir` all fail the run with a specific message rather than producing a partial or empty summary. The CLI exits 0 on success, 1 on any of these failures, and 2 for argparse usage errors.
+
+Aggregate recomputes the full summary from scratch on every run and overwrites `--output-file` directly; rerunning with unchanged inputs reproduces an identical file, with no accumulation across runs.

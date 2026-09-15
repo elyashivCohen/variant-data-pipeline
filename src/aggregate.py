@@ -1,0 +1,132 @@
+"""Stage 3: Aggregate Stage 1 and Stage 2 outputs into one pipeline summary."""
+
+import argparse
+import json
+from pathlib import Path
+import sys
+from typing import Optional
+
+
+def read_process_results(process_dir: Path) -> list[dict]:
+    """Read every Stage 2 metrics file in sorted order, or raise on directory/schema errors."""
+    if not process_dir.is_dir():
+        raise FileNotFoundError(f"Process directory not found: {process_dir}")
+
+    result_files = sorted(process_dir.glob("*.json"))
+    if not result_files:
+        raise ValueError(f"No Stage 2 output files found in {process_dir}")
+
+    results = []
+    for result_file in result_files:
+        with result_file.open("r", encoding="utf-8") as stream:
+            metrics = json.load(stream)
+        if not isinstance(metrics, dict):
+            raise ValueError(f"Root JSON element in {result_file} must be an object")
+        if metrics.get("status") not in ("SUCCESS", "FAILED"):
+            raise ValueError(f"Invalid or missing status in {result_file}")
+        if not isinstance(metrics.get("input_file"), str) or not metrics["input_file"]:
+            raise ValueError(f"Invalid or missing input_file in {result_file}")
+
+        duration = metrics.get("duration_seconds")
+        if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < 0:
+            raise ValueError(f"Invalid or missing duration_seconds in {result_file}")
+
+        skipped = metrics.get("skipped_row_count")
+        if not isinstance(skipped, int) or isinstance(skipped, bool) or skipped < 0:
+            raise ValueError(f"Invalid or missing skipped_row_count in {result_file}")
+
+        results.append(metrics)
+    return results
+
+
+def count_variants_by_chromosome(convert_dir: Path, filenames: list[str]) -> dict[str, int]:
+    """Tally CHROM values across the given Stage 1 output files."""
+    if not convert_dir.is_dir():
+        raise FileNotFoundError(f"Convert directory not found: {convert_dir}")
+
+    counts: dict[str, int] = {}
+    for filename in filenames:
+        convert_file = convert_dir / filename
+        if not convert_file.is_file():
+            raise FileNotFoundError(
+                f"Convert-stage output not found for successfully processed file: {convert_file}"
+            )
+        with convert_file.open("r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+
+        variants = payload.get("variants") if isinstance(payload, dict) else None
+        if not isinstance(variants, list):
+            raise ValueError(f"Invalid or missing variants array in {convert_file}")
+
+        for variant in variants:
+            chrom = variant.get("CHROM") if isinstance(variant, dict) else None
+            if not isinstance(chrom, str):
+                raise ValueError(f"Invalid or missing CHROM value in {convert_file}")
+            counts[chrom] = counts.get(chrom, 0) + 1
+    return counts
+
+
+def aggregate(convert_dir: Path, process_dir: Path) -> dict:
+    """Combine Stage 1 and Stage 2 outputs into one pipeline summary."""
+    results = read_process_results(process_dir)
+
+    successful_filenames = [r["input_file"] for r in results if r["status"] == "SUCCESS"]
+    chromosome_counts = count_variants_by_chromosome(convert_dir, successful_filenames)
+
+    return {
+        "variant_counts_by_chromosome": dict(sorted(chromosome_counts.items())),
+        "total_variant_count": sum(chromosome_counts.values()),
+        "total_skipped_rows": sum(r["skipped_row_count"] for r in results),
+        "total_processing_time_seconds": round(sum(r["duration_seconds"] for r in results), 6),
+        "input_files_processed": [r["input_file"] for r in results],
+    }
+
+
+def write_summary(output_path: Path, summary: dict) -> None:
+    """Write the aggregate summary JSON file, overwriting any existing output."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """CLI entrypoint for Stage 3 Aggregate."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--convert-dir",
+        type=Path,
+        default=Path("data/converted"),
+        help="Directory containing Stage 1 converted JSON files (default: data/converted)",
+    )
+    parser.add_argument(
+        "--process-dir",
+        type=Path,
+        default=Path("data/processed"),
+        help="Directory containing Stage 2 metrics JSON files (default: data/processed)",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=Path("output/summary.json"),
+        help="Path to write the aggregate summary JSON file (default: output/summary.json)",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        summary = aggregate(args.convert_dir, args.process_dir)
+    except Exception as err:
+        sys.stdout.write(f"ERROR: Aggregation failed: {err}\n")
+        sys.stdout.flush()
+        return 1
+
+    write_summary(args.output_file, summary)
+    sys.stdout.write(
+        f"Aggregated {len(summary['input_files_processed'])} file(s): "
+        f"{summary['total_variant_count']} variant(s) across "
+        f"{len(summary['variant_counts_by_chromosome'])} chromosome(s)\n"
+    )
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
