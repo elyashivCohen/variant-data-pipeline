@@ -160,11 +160,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.convert_dir, args.process_dir, args.output_file)
     try:
         summary = aggregate(args.convert_dir, args.process_dir)
+        write_summary(args.output_file, summary)
     except Exception as err:
         logger.error("Aggregation failed: %s", err)
         return 1
 
-    write_summary(args.output_file, summary)
     logger.info(
         "Aggregated %s file(s): %s variant(s) across %s chromosome(s)",
         len(summary["input_files_processed"]),

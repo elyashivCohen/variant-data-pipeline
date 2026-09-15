@@ -1,5 +1,6 @@
 """Unit tests for Stage 3 Aggregate pipeline stage."""
 
+import io
 import json
 from pathlib import Path
 import shutil
@@ -206,6 +207,30 @@ class AggregateTests(unittest.TestCase):
             "--output-file", str(output_file),
         ])
         self.assertEqual(code_missing, 1)
+
+    def test_cli_catches_output_write_failure_without_a_raw_traceback(self):
+        """A write failure after a successful aggregation is caught at the CLI boundary, not raised."""
+        # main() reconfigures the logger's handlers on every call, which also
+        # replaces any handler assertLogs attaches beforehand - so this checks
+        # the actual console stream main() writes to (stdout), matching the
+        # pattern used for the equivalent Convert test.
+        self._build_pipeline(["variants_clean.csv"])
+        output_file = self.root / "output" / "summary.json"
+        stdout_capture = io.StringIO()
+
+        with patch("src.json_io.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")):
+            with patch("sys.stdout", stdout_capture):
+                code = main([
+                    "--convert-dir", str(self.convert_dir),
+                    "--process-dir", str(self.process_dir),
+                    "--output-file", str(output_file),
+                ])
+
+        output = stdout_capture.getvalue()
+        self.assertEqual(code, 1)
+        self.assertEqual(output.count("ERROR:"), 1)
+        self.assertIn("ERROR: Aggregation failed", output)
+        self.assertNotIn("Traceback (most recent call last)", output)
 
     def test_log_file_appends_across_reruns_and_fails_clearly_when_unopenable(self):
         """--log-file records timestamped entries, appends on rerun, and fails clearly if unopenable."""
