@@ -2,8 +2,11 @@
 
 ## Scope and sources
 - This is the IdentifAI Genetics intern take-home pipeline.
-- Current work covers simplifying conversion and testing it; Process,
-  Aggregate, Docker, and orchestration require separately approved work.
+- Convert, Process, Aggregate, Docker/Compose, and the `run_pipeline.ps1`
+  launcher are all implemented; README.md is the current source of truth
+  for architecture, contracts, and run instructions - this file reflects
+  early Convert-only working conventions and is kept for git history, not
+  as a current description.
 - The assignment PDF is external. Never copy it into the repository or Git.
   If unavailable, attribute requirements to the user-provided PDF summary.
 - Keep detailed requirements, contracts, and design decisions in README.md.
@@ -15,8 +18,12 @@
 - tests/fixtures/: proposed location for small authored CSV fixtures.
 - input/variants_1.csv through input/variants_5.csv: original samples;
   preserve them unchanged.
-- data/converted/: default generated conversion outputs.
-- data/processed/ and output/summary.json: planned downstream outputs.
+- Real pipeline runs use `output/<RUN_ID>/{convert,process,aggregate,logs}/`
+  (see README.md), not the `data/converted`/`data/processed` defaults
+  below - those remain only as this module's own argparse fallbacks for
+  running a stage standalone, outside Docker.
+- data/converted/: default generated conversion outputs (standalone use only).
+- data/processed/ and output/summary.json: same, standalone use only.
 
 ## Code and testing
 - Use English for communication, names, comments, docstrings, and logs.

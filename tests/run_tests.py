@@ -1,4 +1,4 @@
-"""Run the Convert suite with readable labels and unittest failure details."""
+"""Run the full test suite with readable labels and unittest failure details."""
 
 import sys
 import unittest

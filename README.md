@@ -1,291 +1,80 @@
 # IdentifAI Genetics — Variant Data Pipeline
 
-## 1. Project Overview
+A three-stage batch pipeline (Convert → Process → Aggregate) that turns CSV variant data into a JSON summary. Built for the IdentifAI Genetics Software Engineering Intern take-home assessment (assignment brief kept out of this repo per its own instructions; `AGENTS.md` records that convention).
 
-This Software Engineering Intern take-home assignment builds a three-stage pipeline to convert CSV variant data, simulate processing, and aggregate results. Convert, Process, and Aggregate are implemented and containerized (§14); the pipeline runner that chains all three is implemented (§13).
+## Prerequisites
 
-## 2. Requirements
+- **Docker Desktop (or engine) with Compose v2, running.** `docker compose version` should succeed before anything below will work.
+- **Windows + PowerShell** to run `run_pipeline.ps1` (Windows PowerShell 5.1 or PowerShell 7+). On macOS/Linux, or without PowerShell, use the Bash commands in "Running stages manually" below — the depends_on chain does the same sequencing either way; only the automatic run-numbering launcher is PowerShell-only.
+- No Python installation is required on the host, for either the pipeline or the tests.
 
-- **Convert:** Read one or more CSV files with columns `index`, `CHROM`, `POS`, `REF`, and `ALT`. Convert each file into structured output. Skip malformed rows, log a warning for each, and continue processing valid rows in the same file.
-- **Process:** Read converted output and simulate a compute-intensive operation with a default 30-second delay per input. Produce per-input status and metrics, such as start/end times, valid row count, and skipped row count.
-- **Aggregate:** Combine processed results into one summary containing variant counts per chromosome, total variant count, total skipped rows, total processing time, and the list of processed input files.
-- Handle malformed input gracefully. Re-running the same inputs must not duplicate or corrupt data.
-- Include tests and containerize at least the Convert stage.
-- Provide a simple way to run the pipeline end-to-end, with no reviewer setup beyond Docker and Compose (per-stage containers are documented in §14; the single command that chains all three - `.\run_pipeline.ps1` - is implemented, see §13).
-- Document design decisions, assumptions, run instructions, AI workflow, and trade-offs.
-
-## 3. Assumptions
-
-- Each input CSV has a header containing the required columns.
-- Each input file is processed independently before aggregation.
-- Total processing time means the sum of Process-stage durations, including the simulated delay.
-
-## 4. Initial High-Level Architecture
-
-```text
-input/*.csv
-    |
-    v
-Convert
-    |
-    v
-data/converted/*.json
-    |
-    v
-Process
-    |
-    v
-data/processed/*.json
-    |
-    v
-Aggregate
-    |
-    v
-output/summary.json
-```
-
-Convert validates rows and records valid variants, source-file identity, and row counts. Process applies the delay and produces status, timing metrics, and the data needed for aggregation. Aggregate produces the final summary.
-
-The local design uses sequential stage execution and a configurable Process delay for tests and development, retaining the 30-second default. All three stages are planned for containerization, with Docker Compose as the likely local runner. These are design choices, not assignment requirements.
-
-## 5. Data / Persistence Strategy
-
-JSON is the implemented conversion format and the proposed downstream format: it is readable and supports records alongside metadata. Each input has one converted output and will have one processed output. The assignment allows JSON without prescribing its exact schema; the metadata object is a project choice.
-
-Files persisted to disk between stages will act as the local pipeline state. Inputs will remain unchanged, and shared host directories will preserve outputs across container runs. No database is planned. This approach keeps the batch workflow simple; concurrent execution is outside the initial design.
-
-## 6. Logging Strategy
-
-All three CLIs log through the standard library, each to its own named logger (`src.convert`, `src.process`, `src.aggregate` - a fixed name, not `__name__`, since `__name__` becomes `"__main__"` when a module is run as `python -m src.X`, which would otherwise make every stage's log lines indistinguishable). Convert logs to stderr, matching its original design; Process and Aggregate log to stdout, matching their existing CLI output. This existing console stream is always active and needs no configuration.
-
-Every CLI also accepts an optional `--log-file PATH` argument (or the `LOG_FILE` environment variable, checked when `--log-file` is omitted) to additionally append formatted log lines to a file - see `src/logging_setup.py`'s `configure_stage_logging`, used identically by all three stages. The console format is unchanged (`LEVEL: message`); the file format adds a timestamp and logger name (`timestamp LEVEL logger: message`) so a shared `logs/` directory stays self-describing per line. The file is opened in append mode, so rerunning a stage with the same `--log-file` accumulates history rather than overwriting it. Re-invoking `main()` (or the CLI) replaces rather than accumulates handlers on the logger, so messages are never duplicated across repeated runs within one process. If the log file path cannot be opened (for example, its parent cannot be created), the CLI prints a clear console error and exits with status 2, without attempting the stage's work - this is treated as a configuration error, the same status code already used for other invalid CLI configuration.
-
-Each stage logs a start line (inputs/outputs and, for Process, the resolved delay), an INFO line per meaningful unit of work (file converted, batch processed, summary aggregated), a WARNING per skipped row (Convert only), an ERROR per skipped file or batch/stage failure, and a full traceback for unexpected internal errors. No stage parses another stage's log to decide anything; the exit code is authoritative and this remains true with logging enabled (see §13).
-
-## 7. Idempotency Strategy
-
-Outputs will use deterministic paths: `input/sample.csv` will map to `data/converted/sample.json` and `data/processed/sample.json`. Reruns will regenerate and overwrite expected outputs instead of appending duplicates.
-
-The summary will be rebuilt from the current run's processed results, excluding stale outputs. Convert already writes temporary files before replacing outputs to prevent partial writes from corrupting existing data.
-
-Unchanged inputs will produce the same variant and skipped-row totals on repeated runs. Timing metadata may change because processing runs again.
-
-## 8. Initial Development Plan
-
-1. Define row validation, JSON structures, and handling for missing headers, unreadable files, empty inputs, and files with no valid rows.
-2. Implement Convert with per-row warnings and safe output writes.
-3. Implement Process with a configurable delay and per-input metrics.
-4. Implement Aggregate and a sequential runner that selects current-run outputs.
-5. Test valid and malformed data, aggregation, repeat runs, stale outputs, and failure handling.
-6. Containerize the stages and verify the full local workflow with shared persistent directories.
-7. Add verified run/test commands, AI workflow notes, and implementation trade-offs to this README.
-
-## 9. Convert Stage
-
-Requires Python 3.9 or later and uses only the standard library. From the repository root:
-
-```sh
-python -m src.convert --input-dir input --output-dir data/converted
-```
-
-`convert(input_dir: Path, output_dir: Path)` reads CSV files directly inside the input directory and returns the JSON paths written during that call. `convert_file(input_path: Path, output_path: Path)` converts a single file independently. JSON contains `source_file`, `row_count`, `skipped_rows`, and `variants`.
-
-Validation choices: files use UTF-8 (an optional BOM is accepted). Header names are trimmed, must be unique after trimming, and must include all required columns. Columns may be reordered and extra columns are ignored. Rows must match the header's field count. Required values are trimmed and must be nonempty; `POS` must be a positive integer. Other required values remain strings, including multi-character alleles. Accepted records retain their input order and supplied index values; no biological validation or deduplication is performed.
-
-Row-level errors (blank records, incorrect field counts, empty required values, invalid positions, and strict CSV parser errors within a file) are skipped with warnings and do not stop the rest of that file. Malformed quoting can consume subsequent physical lines, so a parser error still ends that one file's parsing at that point - continuing within the file cannot reliably recover record boundaries or skipped counts - but it does not stop the batch: the rest of the file's already-accepted records are discarded (the file did not complete) and the batch moves on to the next file.
-
-File-level errors - a file that cannot be opened or decoded, has a missing or duplicate header, or hits a CSV parser error - are logged (`ERROR`, with the file path and reason) and that file is skipped; the rest of the batch keeps going. A failure while *writing* an output (creating the output directory, the temporary file, or the atomic replace) is never treated as a skippable input error: it stops the batch immediately, even if earlier files already succeeded, since it is not a property of any one input file. Missing or invalid input directories are directory-level configuration errors and fail immediately without attempting any file.
-
-The batch fails - raising `ConversionError` - if no input file converts successfully, whether because `input_dir` has no CSV files at all or because every CSV present failed to convert. A file with a valid header and zero valid rows (header-only, or every row skipped) is still a successful conversion: it produces the same metadata shape with an empty `variants` array, and counts toward batch success. Success is judged only by outputs produced during the current call; files already present in `output_dir` from an earlier run are never consulted to decide whether this run succeeded.
-
-The CLI exits with status 0 on success (including success with skipped files - check the log for `ERROR` lines), 1 on conversion failure, and 2 for argparse usage errors or an unopenable `--log-file` (see §6). Files converted before a fatal (output-write or directory-level) failure remain on disk; old outputs for files that were skipped or never attempted this run are not removed. Callers should use the returned paths only after a successful batch call.
-
-Input and output referring to the same file are rejected for that file (skipped, like any other file-level error). Each JSON output is written to a uniquely named temporary sibling file, closed, and then used to replace the expected output, via a small shared helper (`write_json_safely` in `src/json_io.py`) used by all three stages. This preserves previous output on writing or replacement failure and avoids appending duplicates on reruns. Cleanup is attempted on failure; if cleanup also fails, the original error is preserved and a temporary file may remain. Concurrent runs are not supported.
-
-Run-directory isolation (so a rerun can never mix outputs from two different pipeline invocations) is planned for the orchestration milestone via a per-run `RUN_ID`-scoped output directory, not implemented at the stage level; see §13.
-
-Paths are supplied through function arguments or the existing `--input-dir` and `--output-dir` CLI options. Future containers can pass mounted directory paths through these same options; conversion contains no Docker-specific logic. The commands above require a working local Python installation.
-
-## 10. Automated Convert Verification
-
-Run the existing standard-library unittest suite with readable console labels from the repository root:
-
-```sh
-python -B tests/run_tests.py
-```
-
-The runner uses test docstrings as display names, shows `[PASS]`, `[FAIL]`, `[ERROR]`, and `[SKIP]` labels, and retains unittest assertion details and tracebacks. Skips include their reasons. Discovery and project imports are resolved relative to the script. The standard verbose command remains available:
-
-```sh
-python -B -m unittest discover -s tests -v
-```
-
-`input/` contains the five unchanged original assignment CSV files. Authored valid and invalid examples live in `tests/fixtures/`; `tests/test_convert.py` reads these fixtures and the original samples, using temporary output directories with automatic cleanup. No manual-check directories or generated outputs are needed.
-
-The suite checks exact JSON records and accepted/skipped counts, warnings and continued processing after invalid records, header and CSV parser failures, output preservation, reruns, mocked I/O failures, and CLI logs and exit codes. Error scenarios pass only when the expected exception, log, exit code, or output state is observed. Standard verbose unittest reporting shows each test's result and the final totals.
-
-The readable summary counts successful test methods as passes and each failure, error, or skip event separately, including subtest events. A parent with a failed subtest is never reported as passed; several unsuccessful subtests can make event totals exceed the number of test methods. Expected failures are labeled and counted as skips; unexpected successes count as failures. Exit status is 0 when unittest reports success and 1 otherwise.
-
-Verification on Windows with Python 3.13.14: the readable runner ran 23 tests in 0.329 seconds; standard unittest ran 23 tests in 0.319 seconds. Each reported 22 passed, 0 failures, 0 errors, and one symbolic-link test skipped because Windows denied permission (exit code 0). Python 3.9 was not tested. The multiline CSV test writes through `Path.open` with `newline=""` to prevent Windows newline translation while retaining Python 3.9 compatibility.
-
-## 11. Process Stage
-
-Requires Python 3.9 or later and uses only the standard library. From the repository root:
-
-```sh
-python -m src.process --input-dir data/converted --output-dir data/processed --sleep-seconds 0
-```
-
-Omit `--sleep-seconds` for the default 30-second simulated compute delay. The delay can also be set with the `PROCESS_SLEEP_SECONDS` environment variable; `--sleep-seconds` takes precedence when both are given. Input and output paths are configurable; defaults are `data/converted` and `data/processed`.
-
-`process_file(input_path: Path, output_dir: Path, sleep_duration=None) -> dict` processes one Stage 1 JSON file and returns its metrics. `process(input_dir: Path, output_dir: Path, sleep_duration=None) -> list[dict]` processes every `*.json` file directly inside the input directory, in sorted order, sequentially, writing one metrics file per input.
-
-Each output is a JSON object, written to `<output-dir>/<input filename>`, containing:
-
-```json
-{
-  "input_file": "example.json",
-  "status": "SUCCESS",
-  "start_time": "2026-09-14T10:00:00.000000+00:00",
-  "end_time": "2026-09-14T10:00:30.002123+00:00",
-  "duration_seconds": 30.002123,
-  "row_count": 3,
-  "skipped_row_count": 1
-}
-```
-
-`row_count` and `skipped_row_count` are read directly from the Stage 1 output's `row_count` and `skipped_rows` fields. `duration_seconds` is measured with `time.monotonic()` around reading, validation, and the simulated sleep.
-
-Files are processed independently. If one file fails an expected input check — missing file, malformed JSON, or missing/invalid `row_count`/`skipped_rows` — it is recorded with `status: "FAILED"`, `row_count: 0`, `skipped_row_count: 0`, and an `ERROR` line on stdout, and the batch continues to the next file. An unexpected (non-input) exception, or a failure while writing a metrics file, is not disguised as a FAILED record: it propagates and aborts the batch immediately, the same as Convert's write-failure policy. `write_metrics` uses the same temporary-file-then-replace helper as Convert (`src/json_io.py`), so a write failure can never leave a corrupt or partial metrics file behind.
-
-`variant_counts_by_chromosome` is **not** produced by this stage. Per-chromosome variant counts, total variant and skipped-row counts, total processing time, and the list of processed input files are Stage 3 (Aggregate)'s responsibility, computed by combining every Stage 2 output into one summary file.
-
-The batch fails - raising `ValueError` after writing whatever per-file FAILED metrics it could - if zero files succeed, including when `input_dir` has no eligible `*.json` files at all. The CLI exits with status 0 on success (including success with some FAILED files), 1 if the input directory is missing or zero files succeeded, and 2 for an invalid `--sleep-seconds` value, an unopenable `--log-file` (see §6), or argparse usage errors.
-
-## 12. Aggregate Stage
-
-Requires Python 3.9 or later and uses only the standard library. From the repository root:
-
-```sh
-python -m src.aggregate --convert-dir data/converted --process-dir data/processed --output-file output/summary.json
-```
-
-Input and output paths are configurable; defaults are `data/converted`, `data/processed`, and `output/summary.json`.
-
-Aggregate reads from two directories rather than one. Stage 2's metrics files carry status, timing, and row/skipped-row counts but no per-variant data, so computing a chromosome breakdown requires reading Stage 1's `variants` arrays directly. Files are matched by identical filename between `--convert-dir` and `--process-dir` — Process always writes its output under the same filename it read from Convert, so this pairing is exact and requires no separate mapping.
-
-Completeness is checked in both directions before any summary is built. Forward: every `SUCCESS` Stage 2 record must have a matching file in `--convert-dir` (`count_variants_by_chromosome`), since its chromosome data has to come from there. Reverse: every `*.json` file currently in `--convert-dir` must have *some* Stage 2 outcome — `SUCCESS` or `FAILED` — in `--process-dir` (`verify_process_covers_convert_outputs`); a Convert output Process never even attempted indicates a broken pairing between the two directories (for example, pointing Aggregate at mismatched runs), not a normal partial-success outcome, so it fails aggregation rather than silently vanishing from the summary. A file skipped by Convert itself never appears in `--convert-dir` in the first place, so it is correctly invisible to both checks — it was never a completed unit of work this run. Both checks, plus Stage 2's own file validation, complete before the summary object is built, so a validation failure never produces a partial or empty `--output-file`.
-
-`aggregate(convert_dir: Path, process_dir: Path) -> dict` returns the summary object; `main()` writes it to `--output-file`. Example output:
-
-```json
-{
-  "variant_counts_by_chromosome": {"chr1": 2, "chr12": 1, "chr2": 1, "chr3": 1, "chrX": 2, "chrY": 2},
-  "total_variant_count": 9,
-  "total_skipped_rows": 3,
-  "total_processing_time_seconds": 0.000421,
-  "input_files_processed": ["variants_clean.json", "variants_messy.json"]
-}
-```
-
-`variant_counts_by_chromosome` and `total_variant_count` are computed only from files whose Stage 2 record has `status: "SUCCESS"`: a `FAILED` file didn't pass Stage 2's own validation, so its variant data isn't trusted for the final counts, and this also guarantees the per-chromosome values always sum exactly to `total_variant_count`. `total_skipped_rows` and `total_processing_time_seconds` sum across every Stage 2 record regardless of status, since a `FAILED` file still consumed real processing time and, per Stage 2's own behavior, always contributes zero skipped rows. `input_files_processed` lists every file Stage 2 attempted — `SUCCESS` and `FAILED` alike — in sorted filename order.
-
-Errors are surfaced the same way as Convert and Process: plain stdlib exceptions with a stdout `ERROR:` line, no custom exception type. A missing `--convert-dir` or `--process-dir`, an empty `--process-dir` (no `.json` files), a `SUCCESS` record with no matching filename in `--convert-dir`, or a Convert output with no Process outcome at all, each fail the run with a specific message rather than producing a partial or empty summary. The CLI exits 0 on success, 1 on any of these failures, and 2 for argparse usage errors or an unopenable `--log-file` (see §6).
-
-Aggregate recomputes the full summary from scratch on every run and overwrites `--output-file` using the same shared atomic write helper as Convert and Process (`src/json_io.py`); rerunning with unchanged inputs reproduces an identical file, with no accumulation across runs and no risk of a partially written summary.
-
-## 13. Quick Start: Running the Pipeline (Docker + Compose only)
-
-No host Python is required to run the pipeline or its tests - only Docker Desktop (or engine) with Compose v2. `run_pipeline.ps1` is a small PowerShell launcher; it does not run any stage itself or duplicate Compose's own sequencing - it only allocates a run directory and invokes one `docker compose` command, which is the sole implementation of stage ordering (via `depends_on` / `condition: service_completed_successfully` in `docker-compose.pipeline.yml`, §14).
-
-### Run the full pipeline
+## Quick start
 
 ```powershell
 .\run_pipeline.ps1
+if ($LASTEXITCODE -ne 0) { Write-Output "Pipeline failed (exit $LASTEXITCODE)" } else { Write-Output "Pipeline succeeded" }
 ```
 
-This allocates the next `run_<N>` directory, prints the RUN_ID and its output path, then runs:
+This allocates a fresh `output/run_<N>/` directory (see "Run numbering" below), prints its `RUN_ID` and path, builds the image if needed, and runs Convert → Process → Aggregate in order. **Only Aggregate's own log output streams to the console** (see "Exit codes and dependency behavior" below for why); Convert's and Process's build/lifecycle events are still shown, but their `INFO`/`WARNING`/`ERROR` lines are not printed live — they're always in `output/<RUN_ID>/logs/{convert,process}.log`, complete, whether or not the run succeeded. `$LASTEXITCODE` is **0** only if all three stages completed; any other value means something failed — check `output/<RUN_ID>/logs/*.log` for which stage and why.
 
-```powershell
-docker compose -f docker-compose.pipeline.yml up --build --force-recreate
-```
-
-with `RUN_ID` set to that value, and exits with that command's own exit code.
-
-### Run ID numbering
-
-- Runs are numbered `run_1`, `run_2`, `run_3`, ... under `output/`.
-- Before allocating, the launcher lists `output/`, keeps only entries matching `run_<number>` exactly, and ignores everything else (other files, other directory names). The next ID is the highest existing number plus 1, or `run_1` if none exist. For example, `run_1`, `run_2`, `run_5` present → the next run is `run_6`.
-- There is no separate counter file - numbering is derived fresh from the directories present each time, so deleting all `run_<N>` directories naturally resets it back to `run_1`.
-- The ID is allocated once per invocation and passed to Convert, Process, and Aggregate as the same `RUN_ID`; each stage reads/writes only `output/<RUN_ID>/...` (see the mount table in §14) and never touches another run's directory.
-- The launcher creates `output/run_<N>/` itself, without overwriting an existing directory of that name; if creation fails (for example, a race with another invocation - see below), it reports the error and stops before touching Docker.
-- **Sequential local use only.** Two launcher invocations racing to allocate at the same moment are unsupported - the scan-then-create step is not locked against concurrent launches. Run one at a time.
-
-### Run the tests
+**Run the test suite (containerized, no host Python):**
 
 ```
 docker compose run --build --rm tests
 ```
 
-This is a separate one-shot service, gated behind Compose's `test` profile so it never starts as part of running the pipeline. It has no `RUN_ID`, no volumes (real `input/`/`output/` data is never touched - the image carries its own baked-in copy of `input/` and `tests/` for this purpose), and no dependency on the pipeline services, so it works from a fresh shell with no `RUN_ID` set. It runs `tests/run_tests.py` inside the image and exits nonzero on any test failure. This is unit-test verification only - it does not exercise real Docker orchestration; that's what the command above (and §14's Verification) covers.
+Runs the full `unittest` suite inside the image; exits nonzero on any failure. Works from a fresh shell with no `RUN_ID` set (see "Two Compose files" below for why that's guaranteed, not incidental).
 
-### Output and log locations
+## Run numbering
 
-```
-output/run_<N>/convert/    Convert's JSON output
-output/run_<N>/process/    Process's metrics output
-output/run_<N>/aggregate/  Aggregate's summary.json
-output/run_<N>/logs/       convert.log, process.log, aggregate.log
-```
+- Runs are numbered `run_1`, `run_2`, `run_3`, ... under `output/`. The launcher lists `output/`, keeps only entries matching `run_<number>` exactly (everything else is ignored), and allocates the highest existing number plus 1 — or `run_1` if none exist. E.g. `run_1`, `run_2`, `run_5` present → next is `run_6`.
+- No separate counter file: numbering is derived fresh each time, so deleting all `run_<N>` directories resets it to `run_1`.
+- One `RUN_ID` is allocated per invocation and passed to all three stages; each reads/writes only `output/<RUN_ID>/...` and never touches another run's directory. The target directory is created without overwriting an existing one — if that fails, the launcher reports the error and stops before touching Docker.
+- **Sequential local use only.** Two launchers racing to allocate at the same moment are unsupported (the scan-then-create step isn't locked). Run one at a time.
 
-### Rerun behavior
-
-The launcher always allocates a brand-new `run_<N>` - there is no "reuse" case in the normal flow, so nothing is ever cleared or overwritten by running it again. Manually re-invoking a single stage against an *existing* RUN_ID (§14, for debugging) replaces only that stage's own JSON output and appends to its own log file, using the same atomic-write behavior documented since M2/M3 - unrelated to run numbering, and it never touches another stage's or another run's files.
-
-### Exit codes (as verified against real Docker - see §14 Verification)
-
-- `docker compose up --build --force-recreate` (what the launcher runs) exits **0** only when Convert, Process, and Aggregate all completed successfully, in that order.
-- If Convert or Process exits nonzero, Compose reports `service "<name>" didn't complete successfully: exit <code>`, never starts the dependent service(s), and its own exit code is nonzero - the launcher propagates that same nonzero code.
-- Individual stage exit codes (0/1/2 - see §6, §11, §12) are **not** distinguished in the launcher's own final exit code; only "zero on full success, nonzero otherwise" is guaranteed. Check `output/<RUN_ID>/logs/*.log` for which stage failed and why.
-- `--force-recreate` is deliberate, not cosmetic: without it, a previously-exited container could in principle be reused instead of recreated for the new `RUN_ID`'s bind mounts, relying on Compose's own change-detection instead of a guarantee. This was verified directly (§14) - repeated launches produce fresh `Recreate`/`Recreated` containers and correct per-run output every time.
-- `--abort-on-container-exit` / `--exit-code-from` are deliberately **not** used: both treat *any* container exiting as a signal to tear the whole run down, which would abort the pipeline the moment Convert (the first one-shot container) exits successfully, before Process or Aggregate ever start. Plain `docker compose up` was verified to complete the full chain and to return the correct exit code in both the success and failure cases without them.
-
-### Future Scaling (design note, not implemented)
-
-This version processes one local dataset per invocation, numbered sequentially on a single machine. Scaling to multiple independent datasets would need: explicit dataset/job IDs as the output namespace, instead of a local `run_<N>` counter; stage outputs persisted to shared/object storage, with queue messages carrying references and metadata rather than full payloads; multiple workers pulling independent jobs off that queue; and retries that are idempotent/deduplicated, with Aggregate needing an explicit signal that all expected Process outcomes for a job are present, rather than today's directory-listing check. None of this - queues, workers, object storage, distributed coordination - is implemented; today's numbered local directories are a convenience for this single-machine version, not a preview of that design.
-
-## 14. Manual Stage Commands (debugging reference)
-
-The three pipeline stages live in `docker-compose.pipeline.yml` (not the default `docker-compose.yml`, which holds only the unrelated `tests` service - see §13). They're kept in separate files because Compose interpolates every service's variables in a file up front, regardless of which service is targeted; keeping `${RUN_ID:?...}` out of the default file is what lets `docker compose run --build --rm tests` work with no `RUN_ID` set. This section documents that pipeline file directly - useful for running or debugging one stage at a time - and is what `run_pipeline.ps1` itself invokes as a single `docker compose up` call.
-
-### Design
-
-One shared `Dockerfile` (`python:3.12-slim`, stdlib only, `COPY src/ src/`, `COPY tests/ tests/`, `COPY input/ input/`, `ENTRYPOINT ["python", "-m"]`) backs all four services across both Compose files. In `docker-compose.pipeline.yml`, `process` declares `depends_on: convert: condition: service_completed_successfully` and `aggregate` likewise depends on `process` - this dependency graph is the only implementation of stage sequencing (§13); nothing else re-implements it. `restart: "no"` is set on every service: these are batch jobs that exit when the stage completes, not long-running processes.
-
-### Directory layout and mounts
-
-Every pipeline invocation uses a `RUN_ID` (normally a `run_<N>` value allocated by the launcher, §13), giving each run its own directory tree on the host:
+## Output and log locations
 
 ```
-output/<RUN_ID>/convert/    Convert's JSON output
-output/<RUN_ID>/process/    Process's metrics output
-output/<RUN_ID>/aggregate/  Aggregate's summary.json
+output/<RUN_ID>/convert/    Convert's JSON output (one file per input CSV)
+output/<RUN_ID>/process/    Process's per-input metrics
+output/<RUN_ID>/aggregate/  summary.json
 output/<RUN_ID>/logs/       convert.log, process.log, aggregate.log
 ```
 
-`input/` (the original CSVs) is shared and never written to by any container. Mounts are minimized per service:
+## Configuring the Process delay
 
-| Service | Reads | Writes |
-|---|---|---|
-| `convert` | `input/` (ro) | `output/<RUN_ID>/convert/`, `output/<RUN_ID>/logs/` |
-| `process` | `output/<RUN_ID>/convert/` (ro) | `output/<RUN_ID>/process/`, `output/<RUN_ID>/logs/` |
-| `aggregate` | `output/<RUN_ID>/convert/` (ro), `output/<RUN_ID>/process/` (ro) | `output/<RUN_ID>/aggregate/`, `output/<RUN_ID>/logs/` |
+Process defaults to a 30-second simulated compute delay per input file, as required. Override with `PROCESS_SLEEP_SECONDS` (passed through to the container) for faster local runs:
 
-`docker-compose.pipeline.yml` requires `RUN_ID` via `${RUN_ID:?RUN_ID must be set}` on every mount path: an unset or empty `RUN_ID` makes Compose refuse to run with a clear error, before any container starts - this is deliberate, so a direct invocation without the launcher cannot silently reuse a stale or default directory. **`RUN_ID` must be a plain, single directory-name-safe token** - letters, digits, `-`, and `_` only, no `/`, `\`, or `..` segments (the launcher's own `run_<N>` values always satisfy this). Since Git does not track empty directories, create the run's directories explicitly before the first `docker compose run` for a given `RUN_ID` (the launcher does this automatically; the manual commands below do it with `mkdir`/`New-Item`).
+```powershell
+$env:PROCESS_SLEEP_SECONDS = "0"; .\run_pipeline.ps1; Remove-Item Env:\PROCESS_SLEEP_SECONDS
+```
+```bash
+PROCESS_SLEEP_SECONDS=0 docker compose -f docker-compose.pipeline.yml run --rm process
+```
 
-### Commands
+## Architecture and data flow
 
-**PowerShell:**
+```
+input/*.csv → Convert → output/<RUN_ID>/convert/*.json
+                              → Process → output/<RUN_ID>/process/*.json
+                                              → Aggregate → output/<RUN_ID>/aggregate/summary.json
+```
+
+Stages communicate only through JSON files in mounted host directories — no network calls, no shared database. Convert and Aggregate are containerized; Process is too (all three, exceeding the assignment's "containerize at least Convert" requirement). One shared `Dockerfile`/image backs all stage containers plus a separate `tests` container; Compose's `depends_on: condition: service_completed_successfully` is the *only* place stage sequencing is implemented — `run_pipeline.ps1` just allocates the RUN_ID and invokes one Compose command.
+
+### Two Compose files
+
+`docker-compose.yml` (the Compose default, auto-loaded) holds only the `tests` service — no `RUN_ID`, no volumes, so `docker compose run --build --rm tests` works from a fresh shell. `docker-compose.pipeline.yml` holds Convert/Process/Aggregate and requires `RUN_ID` (`${RUN_ID:?RUN_ID must be set}` — refuses to run, before any container starts, if unset). They're two files because Compose interpolates every service's variables in a file up front regardless of which service is targeted, so a `RUN_ID` requirement anywhere in the same file as `tests` would break the no-`RUN_ID` tests command.
+
+### Exit codes and dependency behavior
+
+`run_pipeline.ps1` runs `docker compose -f docker-compose.pipeline.yml run --build --rm aggregate` — not `up`. Compose's `depends_on` still starts Convert then Process first unchanged (the only sequencing implementation), but `docker compose run <service>` returns that service's own exit code directly, which `up` does not reliably do once nothing downstream is blocked by a failure (verified directly: forcing Aggregate alone to fail left `docker compose up` returning 0 despite Aggregate exiting 1). `--abort-on-container-exit`/`--exit-code-from` were tried and rejected for the same reason: verified to abort the whole run the moment Convert exited *successfully*, racing Process starting.
+
+Verified against real Docker: success returns 0; Convert, Process, or Aggregate each failing returns nonzero, with every stage after the failure never starting. Individual stage exit codes (0/1/2 — see "Stage contracts") aren't distinguished in the launcher's own final code; check `output/<RUN_ID>/logs/*.log` for which stage failed and why.
+
+**Trade-off:** `docker compose run <service>` only streams the *primary* service's own log output to the console — Convert's and Process's `INFO`/`WARNING`/`ERROR` lines don't print live (only their container lifecycle events do; `docker compose up` would stream everything, but doesn't fix the exit-code problem above). Nothing is lost: every stage's complete log is always in `output/<RUN_ID>/logs/*.log`.
+
+## Running stages manually (debugging reference)
 
 ```powershell
 $env:RUN_ID = "run_1"
@@ -296,56 +85,149 @@ New-Item -ItemType Directory -Force -Path `
 docker compose -f docker-compose.pipeline.yml build
 
 docker compose -f docker-compose.pipeline.yml run --rm convert
-if ($LASTEXITCODE -ne 0) { throw "Convert failed" }
+if ($LASTEXITCODE -ne 0) { throw "Convert failed (exit $LASTEXITCODE)" }
 
-docker compose -f docker-compose.pipeline.yml run --rm process
-if ($LASTEXITCODE -ne 0) { throw "Process failed" }
+docker compose -f docker-compose.pipeline.yml run --no-deps --rm process
+if ($LASTEXITCODE -ne 0) { throw "Process failed (exit $LASTEXITCODE)" }
 
-docker compose -f docker-compose.pipeline.yml run --rm aggregate
-if ($LASTEXITCODE -ne 0) { throw "Aggregate failed" }
+docker compose -f docker-compose.pipeline.yml run --no-deps --rm aggregate
+if ($LASTEXITCODE -ne 0) { throw "Aggregate failed (exit $LASTEXITCODE)" }
 
 Get-Content "output/$env:RUN_ID/aggregate/summary.json"
 ```
-
-**Bash:**
 
 ```bash
 export RUN_ID=run_1
 mkdir -p "output/$RUN_ID"/{convert,process,aggregate,logs}
 
 docker compose -f docker-compose.pipeline.yml build
-
-docker compose -f docker-compose.pipeline.yml run --rm convert   || { echo "Convert failed"; exit 1; }
-docker compose -f docker-compose.pipeline.yml run --rm process   || { echo "Process failed"; exit 1; }
-docker compose -f docker-compose.pipeline.yml run --rm aggregate || { echo "Aggregate failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --rm convert            || { echo "Convert failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --no-deps --rm process   || { echo "Process failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --no-deps --rm aggregate || { echo "Aggregate failed"; exit 1; }
 
 cat "output/$RUN_ID/aggregate/summary.json"
 ```
 
-`docker compose run --rm <service>` always creates a fresh, ephemeral container, so these manual commands don't need `--force-recreate` the way `up` does (§13). A different `RUN_ID` starts a completely independent run with its own directories; nothing from a previous `RUN_ID` is read, written, or overwritten.
+`--no-deps` on `process` and `aggregate` is required, not optional: both declare `depends_on`, and without `--no-deps`, `docker compose run --rm process` was verified to *also* run `convert` first — defeating the point of running one stage in isolation. `convert` has no dependency, so it's unaffected. `docker compose run --rm <service>` always creates a fresh, ephemeral container. A different `RUN_ID` starts a completely independent run.
 
-### Configuring the delay and logs
+To point `convert` at a different input directory manually, set `INPUT_DIR` before running it: `$env:INPUT_DIR = (Resolve-Path <path>).Path` / `export INPUT_DIR=$(pwd)/<path>`. Unset, it defaults to `./input`.
 
-`PROCESS_SLEEP_SECONDS` passes through from the host shell (declared in `process`'s `environment:` as a bare name) - unset, Process keeps its default 30-second simulated delay unchanged. For a fast smoke test only:
+*Verification scope:* the PowerShell block above, and every underlying `docker compose` command in the Bash block, have been run directly against real Docker on this Windows host (Git Bash, not a separate Linux/macOS machine) during this project. The Bash block as one literal end-to-end sequence, and any behavior specific to a real Linux or macOS host, were reviewed for syntax but not executed there — labeled here rather than left unstated.
+
+### Mounts
+
+| Service | Reads | Writes |
+|---|---|---|
+| `convert` | `input/` (ro; or `$INPUT_DIR`, see above) | `output/<RUN_ID>/convert/`, `output/<RUN_ID>/logs/` |
+| `process` | `output/<RUN_ID>/convert/` (ro) | `output/<RUN_ID>/process/`, `output/<RUN_ID>/logs/` |
+| `aggregate` | `output/<RUN_ID>/convert/` (ro), `output/<RUN_ID>/process/` (ro) | `output/<RUN_ID>/aggregate/`, `output/<RUN_ID>/logs/` |
+
+## Error-handling examples
+
+Four small, reusable example inputs live under `examples/error_handling/`, separate from `input/` and never used by default — pass `-InputDir` to run one:
+
+```powershell
+$env:PROCESS_SLEEP_SECONDS = "0"
+.\run_pipeline.ps1 -InputDir examples\error_handling\<scenario>
+Write-Output "Exit code: $LASTEXITCODE"
+```
+
+On Bash (no PowerShell launcher — use the manual commands from "Running stages manually" with `INPUT_DIR` set):
 
 ```bash
-PROCESS_SLEEP_SECONDS=0 docker compose -f docker-compose.pipeline.yml run --rm process
+export RUN_ID=example_run
+mkdir -p "output/$RUN_ID"/{convert,process,aggregate,logs}
+export INPUT_DIR=$(pwd)/examples/error_handling/<scenario>
+export PROCESS_SLEEP_SECONDS=0
+docker compose -f docker-compose.pipeline.yml run --rm convert            || { echo "Convert failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --no-deps --rm process   || { echo "Process failed"; exit 1; }
+docker compose -f docker-compose.pipeline.yml run --no-deps --rm aggregate || { echo "Aggregate failed"; exit 1; }
 ```
-```powershell
-$env:PROCESS_SLEEP_SECONDS = "0"; docker compose -f docker-compose.pipeline.yml run --rm process; Remove-Item Env:\PROCESS_SLEEP_SECONDS
+
+| Scenario | Input | Demonstrates | Result (verified) |
+|---|---|---|---|
+| `valid/` | 4 well-formed rows | Full success | `wrote 4 records; skipped 0`; summary shows 4 variants/0 skipped; exit **0** |
+| `mixed/` | 5 rows, 3 deliberately invalid (empty `index`, non-numeric `POS`, empty `ALT`) | **Skipped row**: bad records logged and dropped, file still succeeds | 3× `WARNING`, then `wrote 2 records; skipped 3`; exit **0** |
+| `partial_failure/` | One valid file + one file missing the `REF` column | **Failed input file**: bad file skipped and logged, good file still processed | `ERROR: ...skipping file: ...missing required columns: REF`; summary reflects only the good file (3 variants); exit **0** |
+| `missing_column/` | One file only, missing the `ALT` column | **Stage failure**: the *only* file fails, so the whole batch fails | `ERROR` naming the file and column, then `No input file ... converted successfully`; Process/Aggregate never start (their directories stay empty); exit **1** |
+
+The difference between `partial_failure/` (batch still succeeds) and `missing_column/` (batch fails) is exactly the "zero successes" rule in Convert's contract below — same file-level error, different outcome, because of what else is in the batch.
+
+## Stage contracts
+
+All three stages are stdlib-only Python, log via `src.logging_setup` (console always; `--log-file`/`LOG_FILE` optionally appends to a file — console format `LEVEL: message`, file format adds a timestamp and logger name), and write output via `src/json_io.py`'s atomic temp-file-then-replace helper (a write failure never leaves a corrupt or partial output). Exit codes are consistent across all three: **0** success (including success with skipped rows/files), **1** stage failure, **2** configuration/usage error (bad CLI args, unopenable `--log-file`).
+
+**Convert** (`--input-dir`, `--output-dir`, columns `index`/`CHROM`/`POS`/`REF`/`ALT`): validates UTF-8 CSVs, trims/deduplicates headers, requires all five columns (extra columns ignored, order-independent). Per-row errors (blank/malformed fields, non-positive `POS`, wrong field count) are logged as `WARNING` and skipped — the rest of the file continues. Per-file errors (unreadable, bad/duplicate header, CSV parse failure) are logged as `ERROR` and that file is skipped — the rest of the batch continues. The batch fails only if **zero** files convert successfully. A write failure is always fatal, immediately, regardless of earlier successes.
+
+**Process** (`--input-dir`, `--output-dir`, `--sleep-seconds` or `PROCESS_SLEEP_SECONDS`, default 30s): reads each Convert output, sleeps the configured duration, and writes one metrics file (`input_file`, `status`, `start_time`, `end_time`, `duration_seconds`, `row_count`, `skipped_row_count`). A file that fails an input check (missing/malformed JSON, bad schema) is recorded `status: "FAILED"` and the batch continues; an unexpected error or write failure propagates and aborts the batch. Fails only if **zero** files succeed.
+
+**Aggregate** (`--convert-dir`, `--process-dir`, `--output-file`): cross-checks that every `SUCCESS` Process record has a matching Convert file, and every Convert output has *some* Process outcome (`SUCCESS` or `FAILED`) — a mismatch fails aggregation before any output is written. Combines everything into `summary.json`: `variant_counts_by_chromosome` and `total_variant_count` from `SUCCESS` files only; `total_skipped_rows` and `total_processing_time_seconds` across all files; `input_files_processed` lists every file Process attempted. Recomputes from scratch every run — no accumulation.
+
+## Idempotency
+
+Every write goes through the same atomic temp-file-then-replace helper, so a rerun replaces outputs cleanly rather than appending or corrupting them, and a failed write leaves the previous output untouched. Beyond that, run-directory isolation is what actually prevents cross-run corruption: each `RUN_ID` gets its own `output/<RUN_ID>/` tree, so **the launcher's normal flow is always safe** — it never reuses a directory, so there is no stale output to worry about.
+
+**Manually reusing a fixed `RUN_ID` (the debugging path above) is safe only if the input set is unchanged.** Verified: rerunning with the exact same input files reproduces an identical summary (timing fields aside). But rerunning with a *changed* input set against the same `RUN_ID` — a file removed, renamed, or replaced with something Convert would now reject — was verified to leave that file's **previous** JSON output sitting in `output/<RUN_ID>/convert/` untouched, since Convert only writes output for files it currently sees; Process and Aggregate then pick that stale file up as if it were current, because neither stage compares against the live input directory. The result: a "successful" run (exit 0) whose summary silently still includes data for a file that's no longer part of the input. This is a real limitation of the manual-reuse path, not yet fixed. Use a fresh `RUN_ID` (the default launcher behavior) whenever the input set changes.
+
+## Assumptions
+
+- Each input CSV has a header containing the required columns; extra columns and reordering are tolerated.
+- Each input file is converted/processed independently; aggregation is the only cross-file step.
+- "Total processing time" means the sum of Process-stage durations, including the simulated delay.
+- `RUN_ID` is a local output namespace for one invocation, not a dataset/job identity — a distributed version would need a real dataset/job ID instead.
+- The reviewer's Docker install can reach Docker Hub to pull `python:3.12-slim` on first build.
+
+## Design decisions and trade-offs
+
+- **JSON everywhere** for readability and because the assignment doesn't prescribe a schema; no database — the pipeline is a local batch job, and shared host directories are sufficient state between stages.
+- **Compose depends_on over a custom orchestrator**: initially built a small Python/PowerShell runner that manually invoked each stage in sequence; replaced it once verification showed Compose's own dependency graph does the same job with no custom sequencing code to maintain (see git history for that iteration — kept, not squashed).
+- **Numbered run directories over a single fixed output path**: chosen so a rerun can never mix or corrupt another run's output, without needing a cleanup step.
+- **`--no-deps` for manual single-stage runs**: `depends_on` is correct for full pipeline runs but actively wrong for isolated debugging of one stage; documented explicitly since it's easy to miss.
+- **Non-root container user**: all four services (`convert`/`process`/`aggregate`/`tests`) run as UID 1000 by default (`appuser` in the image), not root. Every file each stage writes is created at mode `0600` (owner-only - Python's own `tempfile` default, used by `json_io.write_json_safely`), so **all three pipeline services must run as the same UID**, or a later stage gets `Permission denied` reading an earlier stage's output - confirmed directly by deliberately mismatching them. A per-command `docker compose run --user ...` flag does **not** fix this: it only overrides the one service named on the command line, not the `depends_on` services Compose starts alongside it - also confirmed directly (`convert`/`process` kept running as UID 1000 despite `--user` being set on the `aggregate` invocation). The actual fix, `PIPELINE_UID`/`PIPELINE_GID` (optional env vars, default `1000`/`1000`), is applied uniformly to all three services via `user:` in `docker-compose.pipeline.yml` itself - confirmed working for both the default and an overridden, consistent UID across all three. Needed on native Linux hosts where the host user isn't UID 1000 (the launcher creates `output/<RUN_ID>/...` as whatever user runs it, and that directory's host-filesystem ownership must be readable/writable by whichever UID the containers run as): set `PIPELINE_UID=$(id -u) PIPELINE_GID=$(id -g)` before running. **Verified on Docker Desktop (Windows) only** - real Linux host-directory ownership enforcement (distinct from the container-to-container UID mismatch confirmed above, which reproduces identically on Docker Desktop) was not tested on an actual Linux host in this session.
+
+## Testing
+
+```
+docker compose run --build --rm tests
 ```
 
-Each container already writes `--log-file /app/run/logs/<stage>.log` (see §6) into the mounted `output/<RUN_ID>/logs/` directory, in addition to its normal console output, which `docker compose up`'s live streaming (or `docker logs`, for `run`) captures either way.
+or, with a host Python install, `python -B tests/run_tests.py` (also available as `python -B -m unittest discover -s tests -v`). Covers: row/file/batch-level error handling for all three stages, header and CSV-parser failures, output preservation and safe reruns, mocked I/O failures, CLI exit codes, and end-to-end runs against the real sample data. 71 tests total; one pre-existing skip on Windows (a symlink-permission test Windows denies outside admin).
 
-### Verification
+## Part 2 — Cloud scale (AWS)
 
-**Performed, with a real Docker installation (Docker 29.8.0, Compose v5.5.1 on Windows):**
-- `docker compose run --build --rm tests` from a fresh shell with `RUN_ID` unset: succeeded, 71/71 tests passed inside the container - confirming the default `docker-compose.yml`'s lack of a `RUN_ID` reference actually avoids the cross-file interpolation error (a direct `${RUN_ID:?...}` reference in the *same* file as `tests` was tried first and reproducibly failed for exactly this reason before the two-file split).
-- `docker compose config --services` (default file): printed nothing, since `tests` is the only service and sits behind an unactivated profile - confirms plain `docker compose up` cannot start it.
-- `.\run_pipeline.ps1` end to end: allocated `run_1`, built the image, ran Convert → Process → Aggregate in order with live streamed per-service logs, and exited 0; `summary.json` matched the known values exactly (161 variants, 24 chromosomes, 0 skipped rows, 5 files).
-- A second launcher invocation: allocated `run_2` (ignoring an unrelated pre-existing `output/manual-test-1` directory), ran to completion independently, and left `run_1`'s output and log files byte-for-byte unchanged (verified by hash). Compose logged `Container ... Recreate` / `Recreated` for all three services on this second run, confirming `--force-recreate` is doing real work - not silently skipped because Compose thought nothing had changed.
-- With `output/run_1`, `run_2`, and a manually created empty `output/run_5` present: the next launcher invocation allocated `run_6`, exactly as specified.
-- An invalid Convert input (a CSV missing the required `ALT` header, temporarily substituted for `input/`): Convert exited 1; Compose reported `service "convert" didn't complete successfully: exit 1` and never started Process or Aggregate (their output directories stayed empty); the launcher's own exit code was 1.
-- Full Python test suite, run directly on the host for convenience (distinct from the containerized `tests` service above): `python -B tests/run_tests.py` - 71 tests, 70 passed, 1 pre-existing unrelated skip (see §10).
+*Design proposal only — nothing below is implemented or deployed. This is a sketch of how the same three stages would run on AWS for thousands of files, not a description of the local Compose pipeline above.*
 
-All throwaway verification artifacts (`output/run_*`, the temporary `input/` swap, the pre-existing `output/manual-test-1`) were removed after verification; `output/` is gitignored and empty in the repository.
+**Services and why:** container images in **ECR**; input/output in **S3** (`s3://bucket/<dataset_id>/{input,convert,process,aggregate}/...` — `dataset_id` replaces the local `RUN_ID` as the output namespace). Compute is **AWS Batch on Fargate**: one job definition per stage, same container images and CLI entry points unchanged. `src/convert.py`/`process.py`/`aggregate.py` still only know how to read and write local paths - they are not modified to understand `s3://` URLs. A small wrapper around the existing entrypoint downloads that job's input file(s) from S3 to local container storage before invoking the unchanged CLI, and uploads the resulting output file(s) back to S3 afterward. Batch was chosen because it has **native job dependencies** (a job only starts once its declared dependencies succeed, and **automatically transitions to FAILED if a dependency fails** — confirmed against current AWS Batch documentation) — the same semantics as Compose's `depends_on`, re-hosted rather than redesigned. Convert and Process each run as one Batch job **per input file** (the unit of work is one file, not the dataset); Aggregate stays one job per dataset.
+
+**Establishing the file set, without racing live uploads:** the set of expected files must be known *before* completion is ever checked, so it can't come from listing S3 mid-upload. Instead, the uploader writes every input file, then writes one explicit **manifest object** last (`s3://bucket/<dataset_id>/manifest.json`, listing every expected file key). Only the manifest's own `ObjectCreated` event registers the dataset in DynamoDB (`expected_file_count`, `completed_count: 0`) and triggers fan-out — individual file uploads before the manifest exists don't start anything on their own, so there's no window where "processing" can run ahead of "how many files there are."
+
+**Fan-out and per-file terminal status, including a Convert failure:** the manifest event goes to **SQS** (buffering a burst of one event instead of thousands); a **Lambda** consuming that queue submits, for each listed file, a Convert Batch job and a Process Batch job with `dependsOn` the Convert job's ID. If Convert fails, Process **never runs** but still transitions PENDING→FAILED automatically (Batch's own dependency-failure behavior) — and that transition **is itself a job state-change event**, identical in shape to a normal SUCCEEDED/FAILED one. A second small Lambda, subscribed to Process job state-change events via EventBridge, is the **single place** that ever records a file's terminal outcome — whether Process actually ran and failed, or never ran because Convert failed, the event looks the same and is handled the same way. Nothing upstream (Convert) needs its own separate reporting path.
+
+**Consistency and idempotency under retries/duplicate events:** that Lambda does one **DynamoDB `TransactWriteItems`** call per event — conditionally updating the file's own item (only if its status is still `PENDING`) *and* incrementing the dataset's `completed_count`, atomically (confirmed against current DynamoDB documentation: an all-or-nothing, conditioned multi-item write). A duplicate or retried event for an already-terminal file fails its condition and changes nothing, so the counter can never be incremented twice for the same file. S3 keys are deterministic per `dataset_id/file_id/stage`, so a retried job also overwrites its own prior output rather than creating a new one, and because every key and counter is namespaced by `dataset_id`, two datasets processed concurrently never share either.
+
+**Submitting Aggregate without duplicates - not a guaranteed exactly-once:** after the transaction above, the same Lambda checks `completed_count == expected_file_count`. If true, it does one more conditional update - `SET aggregate_submitted = true` only if that flag isn't already set - and only the invocation that wins this check calls Batch `SubmitJob` for Aggregate; every other concurrent/duplicate invocation sees the flag already set and does nothing - the conditional flag prevents competing handlers from *both* submitting in this normal path. It doesn't cover every case: if `SubmitJob` itself fails after the flag was already set (a transient AWS API error), the dataset is left with every file terminal, the flag set, and no Aggregate job ever created - an ambiguous outcome (was it submitted or not?) that needs a recovery path, not just the flag. The honest gap: a small scheduled reconciliation job (e.g. an hourly EventBridge Scheduler rule) checking for datasets stuck in exactly that state would be needed to actually close it - and that reconciliation retry is itself a second submission attempt, so it has to tolerate Aggregate possibly already having run rather than assume the flag alone guarantees it never did; not built here.
+
+**What Aggregate does with partial or total failure:** Aggregate always runs once triggered, and lists `FAILED` files while excluding them from variant counts - the same per-file distinction the local Aggregate already makes. **This is a deliberate change from local behavior for the total-failure case, not a restatement of it:** locally, if zero files convert successfully, Convert's own stage-level failure blocks Process and Aggregate from ever starting - no summary is produced at all. At the cloud design's per-file granularity, "zero files succeeded across the dataset" is an ordinary outcome of the same fan-out that lets healthy files succeed independently, so Aggregate still runs and reports it: an all-FAILED summary (zero variants, every file listed as FAILED), not a suppressed run. Whether that's the right choice, or whether a total failure should instead skip Aggregate and alert directly, is a real product decision this sketch doesn't resolve.
+
+**One thing that could go wrong at scale, and the mitigation:** a burst of uploads across many datasets at once could submit more Batch jobs than the compute environment's `maxvCpus` ceiling supports. Mitigation: Batch queues the excess instead of failing it - the pipeline slows down under load rather than erroring - and the SQS buffer already smooths the submission burst itself.
+
+**What to monitor:** the percentage of files reaching `FAILED` status per dataset (is the *data* healthy) and the Batch job queue's age/backlog (is the *pipeline* keeping up).
+
+**Assumptions:** one AWS account/region; the uploader can reliably write a manifest last (or an equivalent explicit "done" signal - a real upload client, not S3 listing, is what defines "the file set"); "thousands of files" means thousands of *jobs*, not files large enough to need multipart/streaming reads within a single job.
+
+## What I'd improve with more time
+
+- Detect a changed input set when a `RUN_ID` is manually reused, instead of silently leaving stale per-file output behind (see "Idempotency" above).
+- A cross-platform (Bash/`Makefile`) equivalent of `run_pipeline.ps1`'s run-numbering logic, so the automatic launcher isn't Windows-only.
+- Structured (JSON) logging, to make `output/<RUN_ID>/logs/*.log` machine-parseable instead of just human-readable.
+- Locking around run-ID allocation, if concurrent local launches ever became a real need (currently explicitly unsupported).
+
+## AI tool usage
+
+A few tools were tried early on to get started, including **Codex**. The project then settled on **Claude Code** (Claude Sonnet 5) as the main implementation tool — design discussion, all three stages and their tests, the Dockerfile and both Compose files, the PowerShell launcher, and this README. **ChatGPT** was used separately, alongside Claude Code, to help understand the pipeline, the existing code, and the reasoning behind specific design decisions, rather than for implementation.
+
+**An example of correcting/overriding AI output:** Claude Code's default instinct for making a rerun-safe `RUN_ID` was to build a dedicated "cleanup" container — its own image, symlink-safety checks, the works — to reset a run directory before reuse. That was rejected explicitly ("I want to finish the assignment without adding unnecessary infrastructure") in favor of the much simpler design actually shipped: numbered `run_<N>` directories that are never reused, so there's nothing to clean up. The same pattern happened with orchestration itself — an initial custom Python runner that duplicated Compose's own sequencing logic was removed once it was clear `depends_on` already did the job.
+
+**Best for this kind of work:** exploring Docker Compose/exit-code semantics quickly (many small hypotheses to test), writing thorough unit tests once a contract is pinned down, and keeping documentation in sync with a fast-moving implementation.
+
+**Worst for this kind of work:** defaulting to more infrastructure than a task needs unless explicitly reined in (see the cleanup-container example above), and confidently asserting how a tool (Compose flags, shell exit-code propagation) behaves without having actually run it — several claims in this README were only made *after* being verified against real Docker specifically because an earlier AI-stated assumption turned out to be wrong once tested.

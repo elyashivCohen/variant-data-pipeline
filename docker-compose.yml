@@ -10,7 +10,7 @@
 # image - no RUN_ID, no volumes (real input/output data is never touched),
 # no dependency on the pipeline services, no Docker socket. It is gated
 # behind the "test" profile so it never starts as part of running the
-# pipeline (see docker-compose.pipeline.yml / README section 13).
+# pipeline (see docker-compose.pipeline.yml / README, "Quick start").
 
 services:
   tests:
