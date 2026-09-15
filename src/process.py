@@ -10,6 +10,8 @@ import sys
 import time
 from typing import Optional
 
+from src.json_io import write_json_safely
+
 
 DEFAULT_SLEEP_SECONDS = 30.0
 ENV_SLEEP_VAR = "PROCESS_SLEEP_SECONDS"
@@ -50,9 +52,8 @@ def read_converted_file(file_path: Path) -> dict:
 
 
 def write_metrics(output_path: Path, metrics: dict) -> None:
-    """Write the metrics JSON file, overwriting any existing output."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+    """Write the metrics JSON file atomically, overwriting any existing output."""
+    write_json_safely(output_path, metrics)
 
 
 def process_file(

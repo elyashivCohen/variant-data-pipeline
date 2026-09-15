@@ -96,7 +96,7 @@ The batch fails - raising `ConversionError` - if no input file converts successf
 
 The CLI exits with status 0 on success (including success with skipped files - check the log for `ERROR` lines), 1 on conversion failure, and 2 for argparse usage errors. Files converted before a fatal (output-write or directory-level) failure remain on disk; old outputs for files that were skipped or never attempted this run are not removed. Callers should use the returned paths only after a successful batch call.
 
-Input and output referring to the same file are rejected for that file (skipped, like any other file-level error). Each JSON output is written to a uniquely named temporary sibling file, closed, and then used to replace the expected output. This preserves previous output on writing or replacement failure and avoids appending duplicates on reruns. Cleanup is attempted on failure; if cleanup also fails, the original error is preserved and a temporary file may remain. Concurrent runs are not supported.
+Input and output referring to the same file are rejected for that file (skipped, like any other file-level error). Each JSON output is written to a uniquely named temporary sibling file, closed, and then used to replace the expected output, via a small shared helper (`write_json_safely` in `src/json_io.py`) used by all three stages. This preserves previous output on writing or replacement failure and avoids appending duplicates on reruns. Cleanup is attempted on failure; if cleanup also fails, the original error is preserved and a temporary file may remain. Concurrent runs are not supported.
 
 Run-directory isolation (so a rerun can never mix outputs from two different pipeline invocations) is planned for the orchestration milestone via a per-run `RUN_ID`-scoped output directory, not implemented at the stage level; see §13.
 
@@ -152,7 +152,7 @@ Each output is a JSON object, written to `<output-dir>/<input filename>`, contai
 
 `row_count` and `skipped_row_count` are read directly from the Stage 1 output's `row_count` and `skipped_rows` fields. `duration_seconds` is measured with `time.monotonic()` around reading, validation, and the simulated sleep.
 
-Files are processed independently. If one file fails an expected input check — missing file, malformed JSON, or missing/invalid `row_count`/`skipped_rows` — it is recorded with `status: "FAILED"`, `row_count: 0`, `skipped_row_count: 0`, and an `ERROR` line on stdout, and the batch continues to the next file. An unexpected (non-input) exception, or a failure while writing a metrics file, is not disguised as a FAILED record: it propagates and aborts the batch immediately, the same as Convert's write-failure policy.
+Files are processed independently. If one file fails an expected input check — missing file, malformed JSON, or missing/invalid `row_count`/`skipped_rows` — it is recorded with `status: "FAILED"`, `row_count: 0`, `skipped_row_count: 0`, and an `ERROR` line on stdout, and the batch continues to the next file. An unexpected (non-input) exception, or a failure while writing a metrics file, is not disguised as a FAILED record: it propagates and aborts the batch immediately, the same as Convert's write-failure policy. `write_metrics` uses the same temporary-file-then-replace helper as Convert (`src/json_io.py`), so a write failure can never leave a corrupt or partial metrics file behind.
 
 `variant_counts_by_chromosome` is **not** produced by this stage. Per-chromosome variant counts, total variant and skipped-row counts, total processing time, and the list of processed input files are Stage 3 (Aggregate)'s responsibility, computed by combining every Stage 2 output into one summary file.
 
@@ -188,7 +188,7 @@ Completeness is checked in both directions before any summary is built. Forward:
 
 Errors are surfaced the same way as Convert and Process: plain stdlib exceptions with a stdout `ERROR:` line, no custom exception type. A missing `--convert-dir` or `--process-dir`, an empty `--process-dir` (no `.json` files), a `SUCCESS` record with no matching filename in `--convert-dir`, or a Convert output with no Process outcome at all, each fail the run with a specific message rather than producing a partial or empty summary. The CLI exits 0 on success, 1 on any of these failures, and 2 for argparse usage errors.
 
-Aggregate recomputes the full summary from scratch on every run and overwrites `--output-file` directly; rerunning with unchanged inputs reproduces an identical file, with no accumulation across runs.
+Aggregate recomputes the full summary from scratch on every run and overwrites `--output-file` using the same shared atomic write helper as Convert and Process (`src/json_io.py`); rerunning with unchanged inputs reproduces an identical file, with no accumulation across runs and no risk of a partially written summary.
 
 ## 13. Orchestration (Planned)
 

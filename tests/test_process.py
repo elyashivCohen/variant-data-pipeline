@@ -69,6 +69,19 @@ class ProcessTests(unittest.TestCase):
         file_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return file_path
 
+    def test_write_metrics_uses_shared_atomic_helper(self):
+        """write_metrics is wired to the shared atomic writer: a write failure preserves output."""
+        output_path = self.output_dir / "existing.json"
+        self.output_dir.mkdir(parents=True)
+        output_path.write_bytes(b"previous metrics\n")
+        previous = output_path.read_bytes()
+
+        with patch("src.json_io.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                write_metrics(output_path, {"input_file": "existing.json", "status": "SUCCESS"})
+
+        self.assertEqual(output_path.read_bytes(), previous)
+
     def test_standard_file_processing_content_and_schema(self):
         """Standard valid input produces metrics matching the required schema."""
         input_file = self._create_sample_stage1_file(

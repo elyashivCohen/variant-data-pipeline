@@ -5,8 +5,15 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from src.aggregate import aggregate, count_variants_by_chromosome, main, read_process_results
+from src.aggregate import (
+    aggregate,
+    count_variants_by_chromosome,
+    main,
+    read_process_results,
+    write_summary,
+)
 from src.convert import convert
 from src.process import process, process_file
 
@@ -33,6 +40,19 @@ class AggregateTests(unittest.TestCase):
             shutil.copyfile(FIXTURES / name, self.csv_dir / name)
         convert(self.csv_dir, self.convert_dir)
         return process(self.convert_dir, self.process_dir, sleep_duration=0)
+
+    def test_write_summary_uses_shared_atomic_helper(self):
+        """write_summary is wired to the shared atomic writer: a write failure preserves output."""
+        output_path = self.root / "output" / "summary.json"
+        output_path.parent.mkdir(parents=True)
+        output_path.write_bytes(b"previous summary\n")
+        previous = output_path.read_bytes()
+
+        with patch("src.json_io.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                write_summary(output_path, {"total_variant_count": 0})
+
+        self.assertEqual(output_path.read_bytes(), previous)
 
     def test_aggregation_across_multiple_files(self):
         """Chromosome counts, totals, and file list are correct across two valid files."""

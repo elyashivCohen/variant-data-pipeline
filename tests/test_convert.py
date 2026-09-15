@@ -340,7 +340,7 @@ class ConvertTests(unittest.TestCase):
         """Output creation failures preserve existing output."""
         source = self.copy_fixture("variants_clean.csv")
         previous = self.prepare_existing_output()
-        for target in ("src.convert.Path.mkdir", "src.convert.tempfile.NamedTemporaryFile"):
+        for target in ("src.json_io.Path.mkdir", "src.json_io.tempfile.NamedTemporaryFile"):
             with self.subTest(target=target):
                 with patch(target, side_effect=PermissionError("creation denied")):
                     with self.assertRaises(PermissionError):
@@ -367,7 +367,7 @@ class ConvertTests(unittest.TestCase):
             destination.write = partial_write
             return destination
 
-        with patch("src.convert.tempfile.NamedTemporaryFile", side_effect=failing_temporary_file):
+        with patch("src.json_io.tempfile.NamedTemporaryFile", side_effect=failing_temporary_file):
             with self.assertRaises(OSError) as error:
                 convert(self.input_dir, self.output_dir)
         self.assertIs(error.exception, original_error)

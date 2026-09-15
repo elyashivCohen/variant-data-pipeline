@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 from typing import Optional
 
+from src.json_io import write_json_safely
+
 
 def read_process_results(process_dir: Path) -> list[dict]:
     """Read every Stage 2 metrics file in sorted order, or raise on directory/schema errors."""
@@ -103,9 +105,8 @@ def aggregate(convert_dir: Path, process_dir: Path) -> dict:
 
 
 def write_summary(output_path: Path, summary: dict) -> None:
-    """Write the aggregate summary JSON file, overwriting any existing output."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    """Write the aggregate summary JSON file atomically, overwriting any existing output."""
+    write_json_safely(output_path, summary)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
