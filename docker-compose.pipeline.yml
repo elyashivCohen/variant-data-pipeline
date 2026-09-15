@@ -1,7 +1,7 @@
 # One-shot batch services for the three pipeline stages, chained by Compose's
-# own dependency graph (service_completed_successfully) - see README section
-# 13. This file is named docker-compose.pipeline.yml (not the Compose
-# default) and always invoked with `-f docker-compose.pipeline.yml`,
+# own dependency graph (service_completed_successfully) - see README,
+# "Architecture and data flow". This file is named docker-compose.pipeline.yml
+# (not the Compose default) and always invoked with `-f docker-compose.pipeline.yml`,
 # normally via run_pipeline.ps1, which allocates RUN_ID and passes it
 # through. Keeping it out of the auto-loaded docker-compose.yml (which holds
 # only the unrelated `tests` service, see that file) means running the tests
@@ -14,6 +14,11 @@
 # invocation, without the launcher, cannot silently reuse a stale value;
 # must be a plain directory name (letters, digits, "-", "_" only - no "/",
 # "\", or ".." segments).
+#
+# INPUT_DIR is optional and defaults to ./input (the normal sample data);
+# set it (the launcher's -InputDir parameter does this) to point Convert at
+# a different directory of CSVs instead - see README, "Error-handling
+# examples". Only `convert` reads it.
 #
 # Layout on the host, all under one run's directory:
 #   output/<RUN_ID>/convert/    Convert's JSON output (written by convert)
@@ -35,7 +40,7 @@ services:
       - --log-file
       - /app/run/logs/convert.log
     volumes:
-      - ./input:/app/input:ro
+      - ${INPUT_DIR:-./input}:/app/input:ro
       - ./output/${RUN_ID:?RUN_ID must be set}/convert:/app/run/convert
       - ./output/${RUN_ID:?RUN_ID must be set}/logs:/app/run/logs
 

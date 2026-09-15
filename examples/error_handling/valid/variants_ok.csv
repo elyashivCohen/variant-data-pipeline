@@ -1,0 +1,5 @@
+index,CHROM,POS,REF,ALT
+chr1:1000_A/G,chr1,1000,A,G
+chr2:2000_C/T,chr2,2000,C,T
+chr3:3000_G/A,chr3,3000,G,A
+chrX:4000_T/C,chrX,4000,T,C
