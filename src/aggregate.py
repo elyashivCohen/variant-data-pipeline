@@ -2,11 +2,20 @@
 
 import argparse
 import json
+import logging
 from pathlib import Path
 import sys
 from typing import Optional
 
 from src.json_io import write_json_safely
+from src.logging_setup import configure_stage_logging, resolve_log_file
+
+
+# A fixed name, not __name__: __name__ becomes "__main__" when this module is
+# the entry point (python -m src.aggregate), which would otherwise make the
+# stage unidentifiable in a shared log stream.
+LOGGER_NAME = "src.aggregate"
+logger = logging.getLogger(LOGGER_NAME)
 
 
 def read_process_results(process_dir: Path) -> list[dict]:
@@ -130,22 +139,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=Path("output/summary.json"),
         help="Path to write the aggregate summary JSON file (default: output/summary.json)",
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional log file to append to, in addition to the console "
+             "(default: $LOG_FILE, or console only)",
+    )
     args = parser.parse_args(argv)
 
+    log_file = resolve_log_file(args.log_file)
+    try:
+        configure_stage_logging(LOGGER_NAME, sys.stdout, log_file)
+    except OSError as error:
+        print(f"ERROR: Configuration error: could not open log file {log_file}: {error}",
+              file=sys.stderr)
+        return 2
+
+    logger.info("Aggregate stage starting: convert_dir=%s process_dir=%s output_file=%s",
+                args.convert_dir, args.process_dir, args.output_file)
     try:
         summary = aggregate(args.convert_dir, args.process_dir)
     except Exception as err:
-        sys.stdout.write(f"ERROR: Aggregation failed: {err}\n")
-        sys.stdout.flush()
+        logger.error("Aggregation failed: %s", err)
         return 1
 
     write_summary(args.output_file, summary)
-    sys.stdout.write(
-        f"Aggregated {len(summary['input_files_processed'])} file(s): "
-        f"{summary['total_variant_count']} variant(s) across "
-        f"{len(summary['variant_counts_by_chromosome'])} chromosome(s)\n"
+    logger.info(
+        "Aggregated %s file(s): %s variant(s) across %s chromosome(s)",
+        len(summary["input_files_processed"]),
+        summary["total_variant_count"],
+        len(summary["variant_counts_by_chromosome"]),
     )
-    sys.stdout.flush()
     return 0
 
 

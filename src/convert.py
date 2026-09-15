@@ -3,14 +3,20 @@
 import argparse
 import csv
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
 from src.json_io import write_json_safely
+from src.logging_setup import configure_stage_logging, resolve_log_file
 
 
 REQUIRED_COLUMNS = ("index", "CHROM", "POS", "REF", "ALT")
-logger = logging.getLogger(__name__)
+# A fixed name, not __name__: __name__ becomes "__main__" when this module is
+# the entry point (python -m src.convert), which would otherwise make the
+# stage unidentifiable in a shared log stream.
+LOGGER_NAME = "src.convert"
+logger = logging.getLogger(LOGGER_NAME)
 
 
 class InvalidRowError(ValueError):
@@ -168,8 +174,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, default=Path("input"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/converted"))
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional log file to append to, in addition to the console "
+             "(default: $LOG_FILE, or console only)",
+    )
     arguments = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    log_file = resolve_log_file(arguments.log_file)
+    try:
+        configure_stage_logging(LOGGER_NAME, sys.stderr, log_file)
+    except OSError as error:
+        print(f"ERROR: Configuration error: could not open log file {log_file}: {error}",
+              file=sys.stderr)
+        return 2
+
+    logger.info("Convert stage starting: input_dir=%s output_dir=%s",
+                arguments.input_dir, arguments.output_dir)
     try:
         outputs = convert(arguments.input_dir, arguments.output_dir)
     except (ConversionError, OSError, UnicodeError, csv.Error) as error:

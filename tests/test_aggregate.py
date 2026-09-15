@@ -207,6 +207,27 @@ class AggregateTests(unittest.TestCase):
         ])
         self.assertEqual(code_missing, 1)
 
+    def test_log_file_appends_across_reruns_and_fails_clearly_when_unopenable(self):
+        """--log-file records timestamped entries, appends on rerun, and fails clearly if unopenable."""
+        self._build_pipeline(["variants_clean.csv"])
+        output_file = self.root / "output" / "summary.json"
+        log_file = self.root / "logs" / "aggregate.log"
+        run_args = ["--convert-dir", str(self.convert_dir), "--process-dir", str(self.process_dir),
+                    "--output-file", str(output_file), "--log-file", str(log_file)]
+
+        self.assertEqual(main(run_args), 0)
+        self.assertEqual(main(run_args), 0)
+
+        content = log_file.read_text(encoding="utf-8")
+        self.assertEqual(content.count("Aggregate stage starting"), 2)
+        self.assertRegex(content, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} INFO src\.aggregate:")
+
+        blocked = self.root / "blocked"
+        blocked.write_text("occupies the path a log directory would need", encoding="utf-8")
+        code = main(["--convert-dir", str(self.convert_dir), "--process-dir", str(self.process_dir),
+                     "--output-file", str(output_file), "--log-file", str(blocked / "aggregate.log")])
+        self.assertEqual(code, 2)
+
     def test_end_to_end_with_original_samples(self):
         """Aggregate consumes real Convert+Process output from the original sample CSVs."""
         sample_dir = PROJECT_ROOT / "input"

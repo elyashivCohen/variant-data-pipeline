@@ -1,4 +1,5 @@
 import csv
+import io
 import json
 import logging
 import os
@@ -435,16 +436,41 @@ class ConvertTests(unittest.TestCase):
         self.assertEqual(usage.returncode, 2)
         self.assertIn("usage:", usage.stderr)
 
+    def test_log_file_appends_across_reruns_and_fails_clearly_when_unopenable(self):
+        """--log-file records timestamped entries, appends on rerun, and fails clearly if unopenable."""
+        self.copy_fixture("variants_clean.csv")
+        log_file = self.root / "logs" / "convert.log"
+        run_args = ["--input-dir", str(self.input_dir), "--output-dir", str(self.output_dir),
+                    "--log-file", str(log_file)]
+
+        self.assertEqual(main(run_args), 0)
+        self.assertEqual(main(run_args), 0)
+
+        content = log_file.read_text(encoding="utf-8")
+        self.assertEqual(content.count("Convert stage starting"), 2)
+        self.assertRegex(content, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} INFO src\.convert:")
+
+        blocked = self.root / "blocked"
+        blocked.write_text("occupies the path a log directory would need", encoding="utf-8")
+        code = main(["--input-dir", str(self.input_dir), "--output-dir", str(self.output_dir),
+                     "--log-file", str(blocked / "convert.log")])
+        self.assertEqual(code, 2)
+
     def test_unexpected_exception_logs_traceback_and_returns_failure(self):
         """Unexpected CLI errors include a traceback and return failure."""
+        # main() reconfigures the logger's handlers on every call (so repeated
+        # invocations never accumulate handlers), which also replaces any
+        # handler assertLogs attaches beforehand - so this checks the actual
+        # console stream main() writes to, not logging-record introspection.
+        stderr_capture = io.StringIO()
         with patch("src.convert.convert", side_effect=RuntimeError("injected bug")):
-            with self.assertLogs("src.convert", level="ERROR") as logs:
+            with patch("sys.stderr", stderr_capture):
                 self.assertEqual(main([]), 1)
-        self.assertEqual(len(logs.records), 1)
-        self.assertEqual(logs.records[0].levelno, logging.ERROR)
-        self.assertIsNotNone(logs.records[0].exc_info)
-        self.assertIn("Traceback", logs.output[0])
-        self.assertIn("injected bug", logs.output[0])
+        output = stderr_capture.getvalue()
+        self.assertEqual(output.count("ERROR:"), 1)
+        self.assertIn("ERROR: Unexpected conversion failure", output)
+        self.assertIn("Traceback", output)
+        self.assertIn("injected bug", output)
 
 
 if __name__ == "__main__":

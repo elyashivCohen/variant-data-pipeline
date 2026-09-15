@@ -136,19 +136,18 @@ class ProcessTests(unittest.TestCase):
             mock_sleep.assert_called_once_with(12.5)
 
     def test_corrupted_json_input_writes_failed_metrics_without_crash(self):
-        """Corrupted JSON logs informative error to stdout and produces FAILED metrics."""
+        """Corrupted JSON logs an informative error and produces FAILED metrics."""
         corrupt_file = self.input_dir / "corrupted.json"
         corrupt_file.write_text("{ unclosed json content", encoding="utf-8")
 
-        stdout_capture = io.StringIO()
-        with patch("sys.stdout", stdout_capture):
+        with self.assertLogs("src.process", level="ERROR") as logs:
             metrics = process_file(corrupt_file, self.output_dir, sleep_duration=0)
 
         self.assertEqual(metrics["status"], "FAILED")
         self.assertEqual(metrics["row_count"], 0)
         self.assertEqual(metrics["skipped_row_count"], 0)
         self.assertEqual(metrics["input_file"], "corrupted.json")
-        self.assertIn("ERROR: Failed processing corrupted.json", stdout_capture.getvalue())
+        self.assertIn("Failed processing corrupted.json", logs.output[0])
 
         output_file = self.output_dir / "corrupted.json"
         self.assertTrue(output_file.exists())
@@ -159,12 +158,11 @@ class ProcessTests(unittest.TestCase):
         """Processing a missing input file produces FAILED metrics gracefully."""
         nonexistent = self.input_dir / "missing.json"
 
-        stdout_capture = io.StringIO()
-        with patch("sys.stdout", stdout_capture):
+        with self.assertLogs("src.process", level="ERROR") as logs:
             metrics = process_file(nonexistent, self.output_dir, sleep_duration=0)
 
         self.assertEqual(metrics["status"], "FAILED")
-        self.assertIn("ERROR: Failed processing missing.json", stdout_capture.getvalue())
+        self.assertIn("Failed processing missing.json", logs.output[0])
 
     def test_batch_processing_resilience(self):
         """Batch continues processing all files even if one fails."""
@@ -236,6 +234,26 @@ class ProcessTests(unittest.TestCase):
             "--sleep-seconds", "-1",
         ])
         self.assertEqual(code_invalid_sleep, 2)
+
+    def test_log_file_appends_across_reruns_and_fails_clearly_when_unopenable(self):
+        """--log-file records timestamped entries, appends on rerun, and fails clearly if unopenable."""
+        self._create_sample_stage1_file("cli_sample.json")
+        log_file = self.root / "logs" / "process.log"
+        run_args = ["--input-dir", str(self.input_dir), "--output-dir", str(self.output_dir),
+                    "--sleep-seconds", "0", "--log-file", str(log_file)]
+
+        self.assertEqual(main(run_args), 0)
+        self.assertEqual(main(run_args), 0)
+
+        content = log_file.read_text(encoding="utf-8")
+        self.assertEqual(content.count("Process stage starting"), 2)
+        self.assertRegex(content, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} INFO src\.process:")
+
+        blocked = self.root / "blocked"
+        blocked.write_text("occupies the path a log directory would need", encoding="utf-8")
+        code = main(["--input-dir", str(self.input_dir), "--output-dir", str(self.output_dir),
+                     "--sleep-seconds", "0", "--log-file", str(blocked / "process.log")])
+        self.assertEqual(code, 2)
 
     def test_mixed_success_and_failure_continues_batch(self):
         """Mixed SUCCESS/FAILED outcomes still let the batch complete."""

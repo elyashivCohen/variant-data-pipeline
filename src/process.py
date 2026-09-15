@@ -3,6 +3,7 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -11,10 +12,16 @@ import time
 from typing import Optional
 
 from src.json_io import write_json_safely
+from src.logging_setup import configure_stage_logging, resolve_log_file
 
 
 DEFAULT_SLEEP_SECONDS = 30.0
 ENV_SLEEP_VAR = "PROCESS_SLEEP_SECONDS"
+# A fixed name, not __name__: __name__ becomes "__main__" when this module is
+# the entry point (python -m src.process), which would otherwise make the
+# stage unidentifiable in a shared log stream.
+LOGGER_NAME = "src.process"
+logger = logging.getLogger(LOGGER_NAME)
 
 
 def validate_sleep_duration(duration: float) -> float:
@@ -95,8 +102,7 @@ def process_file(
         status = "FAILED"
         row_count = 0
         skipped_row_count = 0
-        sys.stdout.write(f"ERROR: Failed processing {input_path.name}: {err}\n")
-        sys.stdout.flush()
+        logger.error("Failed processing %s: %s", input_path.name, err)
 
     end_dt = datetime.now(timezone.utc)
     duration_seconds = round(time.monotonic() - t0, 6)
@@ -134,8 +140,7 @@ def process(
     )
 
     if not input_dir.is_dir():
-        sys.stdout.write(f"ERROR: Input directory does not exist: {input_dir}\n")
-        sys.stdout.flush()
+        logger.error("Input directory does not exist: %s", input_dir)
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     input_files = sorted(input_dir.glob("*.json"))
@@ -143,8 +148,7 @@ def process(
 
     succeeded = sum(1 for result in results if result["status"] == "SUCCESS")
     if succeeded == 0:
-        sys.stdout.write(f"ERROR: No files processed successfully from {input_dir}\n")
-        sys.stdout.flush()
+        logger.error("No files processed successfully from %s", input_dir)
         raise ValueError(f"No files processed successfully from {input_dir}")
 
     return results
@@ -171,7 +175,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help=f"Simulated compute sleep duration (default: ${ENV_SLEEP_VAR} or {DEFAULT_SLEEP_SECONDS}s)",
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional log file to append to, in addition to the console "
+             "(default: $LOG_FILE, or console only)",
+    )
     args = parser.parse_args(argv)
+
+    log_file = resolve_log_file(args.log_file)
+    try:
+        configure_stage_logging(LOGGER_NAME, sys.stdout, log_file)
+    except OSError as error:
+        print(f"ERROR: Configuration error: could not open log file {log_file}: {error}",
+              file=sys.stderr)
+        return 2
 
     try:
         sleep_dur = (
@@ -180,21 +199,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             else get_sleep_duration()
         )
     except ValueError as err:
-        sys.stdout.write(f"ERROR: Configuration error: {err}\n")
-        sys.stdout.flush()
+        logger.error("Configuration error: %s", err)
         return 2
 
+    logger.info("Process stage starting: input_dir=%s output_dir=%s sleep_seconds=%s",
+                args.input_dir, args.output_dir, sleep_dur)
     try:
         results = process(args.input_dir, args.output_dir, sleep_dur)
     except Exception as err:
-        sys.stdout.write(f"ERROR: Pipeline execution failed: {err}\n")
-        sys.stdout.flush()
+        logger.error("Pipeline execution failed: %s", err)
         return 1
 
     succeeded = sum(1 for r in results if r["status"] == "SUCCESS")
     failed = sum(1 for r in results if r["status"] == "FAILED")
-    sys.stdout.write(f"Processed {len(results)} file(s): {succeeded} SUCCESS, {failed} FAILED\n")
-    sys.stdout.flush()
+    logger.info("Processed %s file(s): %s SUCCESS, %s FAILED", len(results), succeeded, failed)
     return 0
 
 
