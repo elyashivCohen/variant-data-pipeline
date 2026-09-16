@@ -12,14 +12,15 @@ All three stages are containerized from one image and sequenced by Docker Compos
 - No host Python installation is required for the pipeline or the tests.
 - The image build pulls `python:3.12-slim` from Docker Hub on first use.
 
+> GitHub Codespaces uses Bash by default: copy the Bash blocks. On Windows, use the PowerShell blocks when running in PowerShell.
+
 ## Running the pipeline
 
 **Default run** — the original `input/` directory (`INPUT_DIR` unset) and the required 30s simulated compute delay per file (`PROCESS_SLEEP_SECONDS` unset):
 
+**All platforms — Bash or PowerShell**
+
 ```bash
-docker compose run --build --rm aggregate
-```
-```powershell
 docker compose run --build --rm aggregate
 ```
 
@@ -27,9 +28,14 @@ Exit code **0** means all three stages completed; anything else means a stage fa
 
 **Fast run** (skip the delay, for local iteration):
 
+**Linux / macOS / GitHub Codespaces — Bash**
+
 ```bash
 PROCESS_SLEEP_SECONDS=0 docker compose run --build --rm aggregate
 ```
+
+**Windows — PowerShell**
+
 ```powershell
 $env:PROCESS_SLEEP_SECONDS = "0"
 docker compose run --build --rm aggregate
@@ -41,6 +47,8 @@ Remove-Item Env:\PROCESS_SLEEP_SECONDS
 > **Bash vs. PowerShell environment overrides:** the Bash form (`VAR=value command`) scopes the override to that one command only — nothing to clean up afterward. PowerShell's `$env:VAR = ...` instead persists for the rest of the current session until you `Remove-Item Env:\VAR` or close the shell, so every PowerShell block below removes what it sets. Also note `$LASTEXITCODE` (not `$?`, which is a boolean, not a numeric exit code) is what carries a command's real exit code in PowerShell.
 
 ## Running tests
+
+**All platforms — Bash or PowerShell**
 
 ```
 docker compose run --build --rm tests
@@ -63,6 +71,8 @@ All three stages write into one Docker-managed named volume (`pipeline-output`),
 
 View the summary or a log without knowing Docker's internal volume name (same command in both shells):
 
+**All platforms — Bash or PowerShell**
+
 ```
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/aggregate/summary.json
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/logs/convert.log
@@ -73,10 +83,15 @@ All three use `--no-deps`, so they never run `init` or the pipeline — they onl
 
 **Export everything to a host folder.** This copies all four directories under `/app/run` straight into a folder you choose — it never mounts or modifies the repository itself:
 
+**Linux / macOS / GitHub Codespaces — Bash**
+
 ```bash
 mkdir -p exported-output
 docker compose run --rm --no-deps -v "$(pwd)/exported-output:/export" -u root --entrypoint sh aggregate -c "cp -a /app/run/. /export/ && chmod -R a+rX /export"
 ```
+
+**Windows — PowerShell**
+
 ```powershell
 New-Item -ItemType Directory -Force -Path exported-output | Out-Null
 docker compose run --rm --no-deps -v "${PWD}\exported-output:/export" -u root --entrypoint sh aggregate -c "cp -a /app/run/. /export/ && chmod -R a+rX /export"
@@ -90,6 +105,8 @@ Four small inputs under `examples/error_handling/` (separate from `input/`, neve
 
 ### `valid/` — full success
 
+**Linux / macOS / GitHub Codespaces — Bash**
+
 ```bash
 INPUT_DIR="$(pwd)/examples/error_handling/valid" PROCESS_SLEEP_SECONDS=0 docker compose run --build --rm aggregate
 code=$?
@@ -97,6 +114,9 @@ echo "Exit code: $code"
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/logs/convert.log
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/aggregate/summary.json
 ```
+
+**Windows — PowerShell**
+
 ```powershell
 $env:INPUT_DIR = (Resolve-Path examples\error_handling\valid).Path
 $env:PROCESS_SLEEP_SECONDS = "0"
@@ -112,6 +132,8 @@ Expect: `wrote 4 records; skipped 0` in the log; summary shows 4 variants across
 
 ### `mixed/` — bad rows skipped, file still succeeds
 
+**Linux / macOS / GitHub Codespaces — Bash**
+
 ```bash
 INPUT_DIR="$(pwd)/examples/error_handling/mixed" PROCESS_SLEEP_SECONDS=0 docker compose run --build --rm aggregate
 code=$?
@@ -119,6 +141,9 @@ echo "Exit code: $code"
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/logs/convert.log
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/aggregate/summary.json
 ```
+
+**Windows — PowerShell**
+
 ```powershell
 $env:INPUT_DIR = (Resolve-Path examples\error_handling\mixed).Path
 $env:PROCESS_SLEEP_SECONDS = "0"
@@ -134,6 +159,8 @@ Expect: 3× `WARNING` (empty `index`, non-numeric `POS`, empty `ALT`), then `wro
 
 ### `partial_failure/` — one bad file skipped, one good file still processed
 
+**Linux / macOS / GitHub Codespaces — Bash**
+
 ```bash
 INPUT_DIR="$(pwd)/examples/error_handling/partial_failure" PROCESS_SLEEP_SECONDS=0 docker compose run --build --rm aggregate
 code=$?
@@ -141,6 +168,9 @@ echo "Exit code: $code"
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/logs/convert.log
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/aggregate/summary.json
 ```
+
+**Windows — PowerShell**
+
 ```powershell
 $env:INPUT_DIR = (Resolve-Path examples\error_handling\partial_failure).Path
 $env:PROCESS_SLEEP_SECONDS = "0"
@@ -156,6 +186,8 @@ Expect: `ERROR: ...skipping file: ...missing required columns: REF`; summary ref
 
 ### `missing_column/` — the only file fails, so the whole batch fails
 
+**Linux / macOS / GitHub Codespaces — Bash**
+
 ```bash
 INPUT_DIR="$(pwd)/examples/error_handling/missing_column" PROCESS_SLEEP_SECONDS=0 docker compose run --build --rm aggregate
 code=$?
@@ -163,6 +195,9 @@ echo "Exit code: $code"
 docker compose run --rm --no-deps --entrypoint cat aggregate /app/run/logs/convert.log
 docker compose run --rm --no-deps --entrypoint sh aggregate -c "test -f /app/run/aggregate/summary.json && echo 'STALE SUMMARY FOUND' || echo 'No summary.json (expected: Convert failed, so Aggregate never ran)'"
 ```
+
+**Windows — PowerShell**
+
 ```powershell
 $env:INPUT_DIR = (Resolve-Path examples\error_handling\missing_column).Path
 $env:PROCESS_SLEEP_SECONDS = "0"
