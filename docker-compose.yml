@@ -1,18 +1,125 @@
-# The default, auto-loaded Compose file - deliberately holds only the
-# `tests` service, so `docker compose run --build --rm tests` works from a
-# fresh shell with no RUN_ID set. The three pipeline stages live in
-# docker-compose.pipeline.yml instead, because Compose interpolates every
-# service's variables in a file up front, regardless of which service is
-# targeted; if the pipeline's required `${RUN_ID:?...}` mounts were in this
-# same file, this tests command would fail before RUN_ID is ever relevant.
+# Single Compose file for the whole project: the three pipeline stages
+# (chained by Compose's own depends_on/service_completed_successfully - see
+# README, "Architecture and data flow"), the one-off `init` service that
+# prepares the shared output volume, and the `tests` service. No RUN_ID, no
+# manual UID/GID, no launcher script - every command below is a plain
+# `docker compose ...` invocation.
 #
-# `tests` runs the Python unit test suite (tests/run_tests.py) inside the
-# image - no RUN_ID, no volumes (real input/output data is never touched),
-# no dependency on the pipeline services, no Docker socket. It is gated
-# behind the "test" profile so it never starts as part of running the
-# pipeline (see docker-compose.pipeline.yml / README, "Quick start").
+# Outputs live in one Docker-managed named volume (`pipeline-output`),
+# mounted at /app/run in every stage container, with a fixed layout:
+#   /app/run/convert/    Convert's JSON output (written by convert)
+#   /app/run/process/    Process's metrics output (written by process)
+#   /app/run/aggregate/  Aggregate's summary.json (written by aggregate)
+#   /app/run/logs/       convert.log, process.log, aggregate.log
+# The volume is not tied to any host path; see README, "Inspecting and
+# exporting output" for how to read summary.json/logs or copy everything to
+# a host directory without needing to know Docker's internal volume name.
+#
+# INPUT_DIR is optional and defaults to ./input (the normal sample data);
+# set it to point Convert at a different directory of CSVs instead - see
+# README, "Error-handling examples". Only `convert` reads it.
+#
+# PROCESS_SLEEP_SECONDS (optional, default 30s) is passed straight through
+# to Process - see README, "Configuring the Process delay".
+#
+# `init` (see below) is the only service that runs as root, and only to fix
+# the ownership of a brand-new named volume's mount point (Docker creates it
+# root-owned the first time nothing in the image already owns that path) and
+# to wipe the four subdirectories above before every invocation, so a run
+# never sees another run's leftover files. Every other service - convert,
+# process, aggregate, tests - runs as the image's non-root `appuser` (fixed
+# UID 1000, set once in the Dockerfile; no per-host UID/GID needed, because a
+# named volume has no host-filesystem ownership of its own to match - unlike
+# a bind mount, only the containers accessing it need to agree, and they
+# always run as the same fixed UID here).
+#
+# Verified directly against real Docker (Docker Desktop, Windows host, WSL2
+# backend - see README for what was and wasn't tested elsewhere): `init`,
+# `convert`, and `process` all actually re-execute - not just get skipped as
+# "already completed" - on every subsequent `docker compose run --rm
+# aggregate`, including when PROCESS_SLEEP_SECONDS changes between runs.
 
 services:
+  init:
+    build: .
+    image: identifai-pipeline:latest
+    restart: "no"
+    user: root
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        for d in convert process aggregate logs; do
+          rm -rf "/app/run/$$d"
+          mkdir -p "/app/run/$$d"
+        done
+        chown -R appuser:appuser /app/run
+    volumes:
+      - pipeline-output:/app/run
+
+  convert:
+    build: .
+    image: identifai-pipeline:latest
+    restart: "no"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    command:
+      - src.convert
+      - --input-dir
+      - /app/input
+      - --output-dir
+      - /app/run/convert
+      - --log-file
+      - /app/run/logs/convert.log
+    volumes:
+      - ${INPUT_DIR:-./input}:/app/input:ro
+      - pipeline-output:/app/run
+
+  process:
+    build: .
+    image: identifai-pipeline:latest
+    restart: "no"
+    depends_on:
+      convert:
+        condition: service_completed_successfully
+    environment:
+      - PROCESS_SLEEP_SECONDS
+    command:
+      - src.process
+      - --input-dir
+      - /app/run/convert
+      - --output-dir
+      - /app/run/process
+      - --log-file
+      - /app/run/logs/process.log
+    volumes:
+      - pipeline-output:/app/run
+
+  aggregate:
+    build: .
+    image: identifai-pipeline:latest
+    restart: "no"
+    depends_on:
+      process:
+        condition: service_completed_successfully
+    command:
+      - src.aggregate
+      - --convert-dir
+      - /app/run/convert
+      - --process-dir
+      - /app/run/process
+      - --output-file
+      - /app/run/aggregate/summary.json
+      - --log-file
+      - /app/run/logs/aggregate.log
+    volumes:
+      - pipeline-output:/app/run
+
+  # `docker compose run --build --rm tests` - no dependency on init/convert/
+  # etc, so it never wipes or touches the output volume and never runs the
+  # pipeline. Gated behind the "test" profile so it never starts as part of
+  # running the pipeline.
   tests:
     build: .
     image: identifai-pipeline:latest
@@ -21,3 +128,6 @@ services:
       - python
       - -B
       - tests/run_tests.py
+
+volumes:
+  pipeline-output:

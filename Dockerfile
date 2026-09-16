@@ -7,15 +7,14 @@ COPY src/ src/
 COPY tests/ tests/
 COPY input/ input/
 
-# Non-root runtime user, UID 1000 by default. docker-compose.pipeline.yml
-# overrides this uniformly via PIPELINE_UID/PIPELINE_GID when set (needed on
-# native Linux hosts whose user isn't UID 1000 - see README, "Non-root
-# containers"). A per-command `docker compose run --user` flag is not a
-# substitute: it only overrides the one service named on the command line,
-# not the depends_on services Compose starts alongside it - confirmed
-# directly. Every file each stage writes is mode 0600 (owner-only), so all
-# three services must run as the same UID or a later stage gets Permission
-# denied reading an earlier one's output - also confirmed directly.
+# Non-root runtime user, fixed UID 1000. All pipeline stages share this same
+# image and the same UID, and outputs live in a Docker-managed named volume
+# (docker-compose.yml), not a host bind mount - so there is no host UID to
+# match, only container-to-container consistency, which a single fixed UID
+# already guarantees. The one exception is the `init` service in
+# docker-compose.yml, which overrides `user: root` for one thing only: fixing
+# up the named volume's ownership on first use (Docker creates a new volume's
+# mount point root-owned when nothing in the image already owns that path).
 RUN useradd --create-home --no-log-init --uid 1000 --shell /usr/sbin/nologin appuser
 USER appuser
 

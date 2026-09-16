@@ -18,7 +18,8 @@
 - tests/fixtures/: proposed location for small authored CSV fixtures.
 - input/variants_1.csv through input/variants_5.csv: original samples;
   preserve them unchanged.
-- Real pipeline runs use `output/<RUN_ID>/{convert,process,aggregate,logs}/`
+- Real pipeline runs write to `/app/run/{convert,process,aggregate,logs}/`
+  inside containers, backed by the `pipeline-output` Docker named volume
   (see README.md), not the `data/converted`/`data/processed` defaults
   below - those remain only as this module's own argparse fallbacks for
   running a stage standalone, outside Docker.

@@ -11,5 +11,3 @@ README.md
 AGENTS.md
 Dockerfile
 docker-compose.yml
-docker-compose.pipeline.yml
-run_pipeline.ps1
